@@ -71,32 +71,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Ubuntu ports, so raylib can be cross-compiled for riscv64-linux-gnu.
 # ---------------------------------------------------------------------------
 RUN if [ "$TARGETARCH" = "amd64" ]; then set -eux; \
-        # Reconcile/upgrade the native packages BEFORE introducing the foreign
-        # architecture. Otherwise apt's resolver tries to re-resolve essential
-        # native packages (dpkg/apt/util-linux) alongside the riscv64 ones and
-        # breaks ("held broken packages").
-        apt-get update; \
-        apt-get dist-upgrade -y --no-install-recommends; \
+        # riscv64 packages only exist on ports.ubuntu.com. Rewrite the apt
+        # sources as explicit per-architecture entries (amd64 from
+        # archive/security, riscv64 from ports). Using a clean, arch-qualified
+        # sources.list is more reliable for multiarch than pinning the deb822
+        # ubuntu.sources in place, which made apt's resolver re-break essential
+        # native packages (dpkg/apt/util-linux).
+        rm -f /etc/apt/sources.list.d/ubuntu.sources; \
+        printf '%s\n' \
+            'deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble main universe restricted multiverse' \
+            'deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-updates main universe restricted multiverse' \
+            'deb [arch=amd64] http://security.ubuntu.com/ubuntu noble-security main universe restricted multiverse' \
+            'deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble main universe' \
+            'deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble-updates main universe' \
+            > /etc/apt/sources.list; \
         dpkg --add-architecture riscv64; \
-        # riscv64 packages only exist on ports.ubuntu.com. The default
-        # archive/security mirrors do not host riscv64, so once the architecture
-        # is added apt would 404 on their riscv64 indices. Pin the default
-        # mirrors to amd64 and give riscv64 its own ports source (all suites).
-        if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
-            sed -i '/^Components:/i Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources; \
-        fi; \
-        if [ -f /etc/apt/sources.list ]; then \
-            sed -i 's/^deb http/deb [arch=amd64] http/' /etc/apt/sources.list; \
-        fi; \
-        printf 'deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble noble-updates noble-backports main universe\n' \
-            > /etc/apt/sources.list.d/riscv64-ports.list; \
-        printf 'deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble-security main universe\n' \
-            >> /etc/apt/sources.list.d/riscv64-ports.list; \
         apt-get update; \
         # RISC-V is a first-class target: install its X11/GL stack and FAIL the
-        # build if it is not present (no silent degradation). --no-upgrade keeps
-        # apt from touching the already-consistent native packages.
-        apt-get install -y --no-install-recommends --no-upgrade \
+        # build if it is not present (no silent degradation).
+        apt-get install -y --no-install-recommends \
             libc6:riscv64 libbsd0:riscv64 libzstd1:riscv64 zlib1g:riscv64 \
             libicu74:riscv64 libedit2:riscv64 libelf1t64:riscv64 libxml2:riscv64 \
             libx11-dev:riscv64 libxrandr-dev:riscv64 libxi-dev:riscv64 \
