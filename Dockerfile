@@ -42,6 +42,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xz-utils \
         ccache \
         pkg-config \
+        # Python (emsdk invokes `python`; noble only ships python3)
+        python3 \
+        python-is-python3 \
         # raylib desktop runtime/build deps (X11 + GL)
         libx11-dev \
         libxrandr-dev \
@@ -84,14 +87,19 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then set -eux; \
         printf 'deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble-security main universe\n' \
             >> /etc/apt/sources.list.d/riscv64-ports.list; \
         apt-get update; \
-        # Bootstrap the foreign libc first, then the X11/GL dev libs. This is
-        # best-effort: RISC-V is an experimental target, so a failure here must
-        # NOT block building the rest of the image (RISC-V CI job is continue-on-error).
-        { apt-get install -y --no-install-recommends libc6:riscv64 \
+        # Staged, best-effort install: foreign base libs first, then X11, then
+        # mesa. Installing in stages helps apt's resolver with the deep riscv64
+        # dependency tree. RISC-V is an experimental target, so a failure here
+        # must NOT block building the rest of the image (RISC-V CI job is
+        # continue-on-error).
+        { apt-get install -y --no-install-recommends \
+                libc6:riscv64 libbsd0:riscv64 libzstd1:riscv64 zlib1g:riscv64 \
+                libicu74:riscv64 libedit2:riscv64 libelf1t64:riscv64 libxml2:riscv64 \
             && apt-get install -y --no-install-recommends \
                 libx11-dev:riscv64 libxrandr-dev:riscv64 libxi-dev:riscv64 \
-                libxcursor-dev:riscv64 libxinerama-dev:riscv64 libgl1-mesa-dev:riscv64; } \
-            || echo "WARNING: riscv64 multiarch X11 libs failed to install; the RISC-V build may not link raylib"; \
+                libxcursor-dev:riscv64 libxinerama-dev:riscv64 \
+            && apt-get install -y --no-install-recommends libgl1-mesa-dev:riscv64; } \
+            || echo "WARNING: riscv64 multiarch X11/GL libs failed to install; the RISC-V build may not link raylib"; \
         rm -rf /var/lib/apt/lists/*; \
     fi
 
