@@ -71,6 +71,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Ubuntu ports, so raylib can be cross-compiled for riscv64-linux-gnu.
 # ---------------------------------------------------------------------------
 RUN if [ "$TARGETARCH" = "amd64" ]; then set -eux; \
+        # Reconcile/upgrade the native packages BEFORE introducing the foreign
+        # architecture. Otherwise apt's resolver tries to re-resolve essential
+        # native packages (dpkg/apt/util-linux) alongside the riscv64 ones and
+        # breaks ("held broken packages").
+        apt-get update; \
+        apt-get dist-upgrade -y --no-install-recommends; \
         dpkg --add-architecture riscv64; \
         # riscv64 packages only exist on ports.ubuntu.com. The default
         # archive/security mirrors do not host riscv64, so once the architecture
@@ -87,19 +93,18 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then set -eux; \
         printf 'deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble-security main universe\n' \
             >> /etc/apt/sources.list.d/riscv64-ports.list; \
         apt-get update; \
-        # Staged, best-effort install: foreign base libs first, then X11, then
-        # mesa. Installing in stages helps apt's resolver with the deep riscv64
-        # dependency tree. RISC-V is an experimental target, so a failure here
-        # must NOT block building the rest of the image (RISC-V CI job is
-        # continue-on-error).
-        { apt-get install -y --no-install-recommends \
-                libc6:riscv64 libbsd0:riscv64 libzstd1:riscv64 zlib1g:riscv64 \
-                libicu74:riscv64 libedit2:riscv64 libelf1t64:riscv64 libxml2:riscv64 \
-            && apt-get install -y --no-install-recommends \
-                libx11-dev:riscv64 libxrandr-dev:riscv64 libxi-dev:riscv64 \
-                libxcursor-dev:riscv64 libxinerama-dev:riscv64 \
-            && apt-get install -y --no-install-recommends libgl1-mesa-dev:riscv64; } \
-            || echo "WARNING: riscv64 multiarch X11/GL libs failed to install; the RISC-V build may not link raylib"; \
+        # RISC-V is a first-class target: install its X11/GL stack and FAIL the
+        # build if it is not present (no silent degradation). --no-upgrade keeps
+        # apt from touching the already-consistent native packages.
+        apt-get install -y --no-install-recommends --no-upgrade \
+            libc6:riscv64 libbsd0:riscv64 libzstd1:riscv64 zlib1g:riscv64 \
+            libicu74:riscv64 libedit2:riscv64 libelf1t64:riscv64 libxml2:riscv64 \
+            libx11-dev:riscv64 libxrandr-dev:riscv64 libxi-dev:riscv64 \
+            libxcursor-dev:riscv64 libxinerama-dev:riscv64 libgl1-mesa-dev:riscv64; \
+        # Verify the riscv64 X11/GL dev stack is really installed.
+        dpkg-query -W -f='${Status}\n' libx11-dev:riscv64 | grep -q "install ok installed"; \
+        dpkg-query -W -f='${Status}\n' libgl1-mesa-dev:riscv64 | grep -q "install ok installed"; \
+        echo "OK: riscv64 multiarch X11/GL libs installed"; \
         rm -rf /var/lib/apt/lists/*; \
     fi
 
