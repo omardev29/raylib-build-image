@@ -72,23 +72,26 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then set -eux; \
         # riscv64 packages only exist on ports.ubuntu.com. The default
         # archive/security mirrors do not host riscv64, so once the architecture
         # is added apt would 404 on their riscv64 indices. Pin the default
-        # mirrors to amd64 and give riscv64 its own ports source.
+        # mirrors to amd64 and give riscv64 its own ports source (all suites).
         if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
             sed -i '/^Components:/i Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources; \
         fi; \
         if [ -f /etc/apt/sources.list ]; then \
             sed -i 's/^deb http/deb [arch=amd64] http/' /etc/apt/sources.list; \
         fi; \
-        printf 'deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble main universe\n' \
+        printf 'deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble noble-updates noble-backports main universe\n' \
             > /etc/apt/sources.list.d/riscv64-ports.list; \
+        printf 'deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble-security main universe\n' \
+            >> /etc/apt/sources.list.d/riscv64-ports.list; \
         apt-get update; \
-        apt-get install -y --no-install-recommends \
-            libx11-dev:riscv64 \
-            libxrandr-dev:riscv64 \
-            libxi-dev:riscv64 \
-            libxcursor-dev:riscv64 \
-            libxinerama-dev:riscv64 \
-            libgl1-mesa-dev:riscv64; \
+        # Bootstrap the foreign libc first, then the X11/GL dev libs. This is
+        # best-effort: RISC-V is an experimental target, so a failure here must
+        # NOT block building the rest of the image (RISC-V CI job is continue-on-error).
+        { apt-get install -y --no-install-recommends libc6:riscv64 \
+            && apt-get install -y --no-install-recommends \
+                libx11-dev:riscv64 libxrandr-dev:riscv64 libxi-dev:riscv64 \
+                libxcursor-dev:riscv64 libxinerama-dev:riscv64 libgl1-mesa-dev:riscv64; } \
+            || echo "WARNING: riscv64 multiarch X11 libs failed to install; the RISC-V build may not link raylib"; \
         rm -rf /var/lib/apt/lists/*; \
     fi
 
