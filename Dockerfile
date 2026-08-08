@@ -56,9 +56,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxkbcommon-dev \
         wayland-protocols \
         extra-cmake-modules \
-        # Headless X server for the CI runtime smoke tests (runs the game with
-        # no physical display; Mesa provides software GL).
+        # Headless X server + Mesa software GL for the CI runtime smoke tests
+        # (runs the game with no physical display; llvmpipe renders in software).
         xvfb \
+        libgl1-mesa-dri \
         # Cross toolchains (Linux ARM64 + RISC-V) + qemu for running foreign bins
         gcc-aarch64-linux-gnu \
         g++-aarch64-linux-gnu \
