@@ -1,6 +1,9 @@
 # Builds the CI build-image (Dockerfile) and pushes it to GHCR.
-# The raylib_cmake_template repo runs its Linux jobs inside this image, so
+# The raylib_multiplatform repo runs its Linux jobs inside this image, so
 # toolchains are frozen and nothing is downloaded at job time.
+#
+# Pull requests build the image for both architectures but do NOT push, so a
+# broken Dockerfile is caught before it reaches main instead of after.
 #
 # All third-party actions are pinned by full commit SHA and run on Node 22+
 # (GitHub is deprecating Node 20 actions).
@@ -8,6 +11,10 @@
 name: Build & push CI image
 
 on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - '.github/workflows/docker-image.yaml'
   push:
     branches: [main]
     paths:
@@ -15,27 +22,41 @@ on:
       - '.github/workflows/docker-image.yaml'
   workflow_dispatch:
 
+# Two pushes in a row must not race to overwrite :latest, and the loser must
+# not win. Tags are never built here, so cancelling in-progress runs is safe.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write
+    outputs:
+      image: ${{ steps.img.outputs.name }}
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up QEMU (multiarch)
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8  # v4
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8  # v4.2.0
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -48,14 +69,57 @@ jobs:
           echo "name=${owner}/raylib-build" >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
         with:
           context: .
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: |
             ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:latest
             ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Attestations turn the pushed manifest into an OCI index with extra
+          # entries, which makes GHCR display bogus `unknown/unknown` platforms.
+          provenance: false
+          sbom: false
+          # Registry cache, not type=gha: this image is ~10 GB and mode=max
+          # blows straight through the 10 GB per-repo Actions cache limit,
+          # evicting itself on every run.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:buildcache
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}:buildcache,mode=max', env.REGISTRY, steps.img.outputs.name) || '' }}
+
+      # The immutable reference the consuming repo should pin. A tag can be
+      # moved; a digest cannot.
+      - name: Report immutable digest
+        if: github.event_name != 'pull_request'
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ steps.img.outputs.name }}"
+          DIGEST="${{ steps.build.outputs.digest }}"
+          {
+            echo "## Build image published"
+            echo
+            echo '```'
+            echo "${IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "Pin this in \`raylib_multiplatform\`'s \`ci.yml\` (\`BUILD_IMAGE\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "${IMAGE}@${DIGEST}"
+
+      # Proves the image actually contains what the Dockerfile claims, on the
+      # architecture CI will really use.
+      - name: Verify published image (amd64)
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          REF="${{ env.REGISTRY }}/${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}"
+          docker run --rm --platform linux/amd64 "$REF" bash -lc '
+            set -e
+            cat /etc/raylib-build-image.json
+            cmake --version | head -1
+            ninja --version
+            emcc --version | head -1
+            test -d "$ANDROID_NDK_HOME"
+            echo "OK: image verified"
+          '
