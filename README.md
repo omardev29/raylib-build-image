@@ -25,6 +25,16 @@ The image also writes `/etc/raylib-build-image.json`, a manifest of every pinned
 version plus the architecture. Every containerised CI job `cat`s it as its first
 step, so a failing log always states exactly which toolchain produced it.
 
+**What "frozen" does not mean here.** Rebuilding this `Dockerfile` unchanged
+gives you the same *contents* — same packages, same tarballs, same compilers —
+but not necessarily the same image digest. Docker records creation timestamps in
+the image config, so two builds minutes apart differ at the metadata level even
+when every byte of every layer matches. Bit-identical rebuilds would need
+`SOURCE_DATE_EPOCH` plus buildx's `rewrite-timestamp`, which is deliberately not
+enabled: the property that matters for CI is that the toolchain cannot change
+underneath you, and that is what the pins above buy. Consumers pin the digest
+anyway, so they are unaffected either way.
+
 ## Contents
 
 Multiarch (`linux/amd64` + `linux/arm64`). Includes:
