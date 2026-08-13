@@ -112,9 +112,16 @@ RUN apt-get install -y --no-install-recommends \
         xz-utils \
         ccache \
         pkg-config \
-        # Python (emsdk invokes `python`; noble only ships python3)
+        # Python (emsdk invokes `python`; noble only ships python3).
+        # 3.12 gives `tomllib` in the stdlib, which is what tools/configure.py
+        # parses raylib_multiplatform.toml with — no pip, nothing downloaded.
         python3 \
         python-is-python3 \
+        # Pillow, for generating the Android launcher icons from the single
+        # source PNG in the config. The Android job runs entirely inside this
+        # container, so there is no host step to escape to, and PNG decoding is
+        # not in the stdlib. From the apt snapshot, so it stays frozen.
+        python3-pil \
         # raylib desktop runtime/build deps (X11 + GL)
         libx11-dev \
         libxrandr-dev \
@@ -274,8 +281,14 @@ RUN set -eux; \
 WORKDIR /work
 
 # Smoke check so a broken image fails at build time, not at CI time.
+# The two Python assertions matter as much as the compilers: tools/configure.py
+# needs `tomllib` to read the config at all, and Pillow to produce the Android
+# launcher icons. Without them the Android job fails halfway through instead of
+# the image failing to build.
 RUN cmake --version && ninja --version && gcc --version | head -1 \
     && aarch64-linux-gnu-gcc --version | head -1 \
     && riscv64-linux-gnu-gcc --version | head -1 \
     && emcc --version | head -1 \
-    && java -version 2>&1 | head -1
+    && java -version 2>&1 | head -1 \
+    && python3 -c "import sys, tomllib; print('python', '.'.join(map(str, sys.version_info[:3])), '+ tomllib')" \
+    && python3 -c "import PIL; print('pillow', PIL.__version__)"
