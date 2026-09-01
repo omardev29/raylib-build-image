@@ -62,6 +62,10 @@ ARG UPX_SHA256_AARCH64=55d48a61e8ffd17152db871c855376cba7f08e830b37799d0947a16df
 ARG BUTLER_VERSION=15.24.0
 ARG BUTLER_SHA256_X86_64=bee1d708b5ed3dc7efcda3b5416ad5ca87a04d7e5fb6ebada510f3ba0cba3b69
 
+# actionlint, for the lint job. amd64 only, which is what that job runs on.
+ARG ACTIONLINT_VERSION=1.7.12
+ARG ACTIONLINT_SHA256_X86_64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+
 ARG NINJA_VERSION=1.12.1
 ARG NINJA_SHA256_X86_64=6f98805688d19672bd699fbbfa2c2cf0fc054ac3df1f0e6a47664d963d530255
 ARG NINJA_SHA256_AARCH64=5c25c6570b0155e95fce5918cb95f1ad9870df5768653afe128db822301a05a1
@@ -155,6 +159,13 @@ RUN apt-get install -y --no-install-recommends \
         libxkbcommon-dev \
         wayland-protocols \
         extra-cmake-modules \
+        # DRM/KMS: straight to the screen through the kernel, no X11 and no
+        # Wayland. The linux-drm job used to apt-get these at job time, which is
+        # exactly the download that takes a pipeline down on a bad day.
+        libdrm-dev \
+        libgbm-dev \
+        libegl1-mesa-dev \
+        libgles2-mesa-dev \
         # Headless X server + Mesa software GL for the CI runtime smoke tests
         # (runs the game with no physical display; llvmpipe renders in software).
         xvfb \
@@ -244,6 +255,23 @@ RUN set -eux; \
     chmod +x /usr/local/bin/upx; \
     rm -rf /tmp/upx.tar.xz "/tmp/${name}"; \
     upx --version | head -1
+
+# ---------------------------------------------------------------------------
+# actionlint (pinned + verified). amd64 only.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        echo "actionlint: amd64 only; skipping"; \
+    else \
+        curl -fsSL \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            -o /tmp/actionlint.tgz; \
+        echo "${ACTIONLINT_SHA256_X86_64}  /tmp/actionlint.tgz" | sha256sum -c -; \
+        tar -xzf /tmp/actionlint.tgz -C /usr/local/bin actionlint; \
+        chmod +x /usr/local/bin/actionlint; \
+        rm /tmp/actionlint.tgz; \
+        actionlint --version; \
+    fi
 
 # ---------------------------------------------------------------------------
 # butler (pinned + verified). amd64 only.
@@ -367,6 +395,7 @@ RUN set -eux; \
       "  \"cmake\": \"${CMAKE_VERSION}\"," \
       "  \"zig\": \"${ZIG_VERSION}\"," \
       "  \"upx\": \"${UPX_VERSION}\"," \
+      "  \"actionlint\": \"${ACTIONLINT_VERSION}\"," \
       "  \"butler\": \"${BUTLER_VERSION}\"," \
       "  \"ninja\": \"${NINJA_VERSION}\"," \
       "  \"emscripten\": \"${EMSCRIPTEN_VERSION}\"," \
