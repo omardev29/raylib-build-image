@@ -40,6 +40,16 @@ ARG CMAKE_VERSION=3.30.3
 ARG CMAKE_SHA256_X86_64=4a5864e9ff0d7945731fe6d14afb61490bf0ec154527bc3af0456bd8fa90decb
 ARG CMAKE_SHA256_AARCH64=420f17c58de4ed8b53c1055a34318aec5c06d94b04dac9dd3c72861dfdc99d52
 
+# Zig, used ONLY as a C/C++ cross-compiler for the Linux targets, so the shipped
+# binary can ask for an older glibc than this image has. See [linux] glibc in
+# raylib_multiplatform.toml and tools/linux_build.sh.
+ARG ZIG_VERSION=0.16.0
+ARG ZIG_SHA256_X86_64=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+ARG ZIG_SHA256_AARCH64=ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+# The glibc the cache is warmed for. It has to match the project's default,
+# because warming for the wrong one buys nothing.
+ARG ZIG_WARM_GLIBC=2.28
+
 ARG NINJA_VERSION=1.12.1
 ARG NINJA_SHA256_X86_64=6f98805688d19672bd699fbbfa2c2cf0fc054ac3df1f0e6a47664d963d530255
 ARG NINJA_SHA256_AARCH64=5c25c6570b0155e95fce5918cb95f1ad9870df5768653afe128db822301a05a1
@@ -184,6 +194,11 @@ RUN set -eux; \
     rm /tmp/cmake.tar.gz
 ENV PATH=/opt/cmake/bin:$PATH
 
+# Where the warmed zig cache lives, so tools/linux_build.sh finds it instead of
+# rebuilding libc++ on every job. Read-only to the build; zig writes anything
+# new under it only if it can, and falls back to the user's own cache if not.
+ENV ZIG_GLOBAL_CACHE_DIR=/opt/zig-cache
+
 # ---------------------------------------------------------------------------
 # Ninja (pinned + verified)
 # ---------------------------------------------------------------------------
@@ -199,6 +214,42 @@ RUN set -eux; \
     chmod +x /usr/local/bin/ninja; \
     rm /tmp/ninja.zip; \
     ninja --version
+
+# ---------------------------------------------------------------------------
+# Zig (pinned + verified), and its libc++ built ahead of time
+# ---------------------------------------------------------------------------
+# WHY IT IS IN THE IMAGE. tools/linux_build.sh downloads it otherwise, which
+# works but costs ~45 MB on every Linux job.
+#
+# WHY THE CACHE IS WARMED, which is the larger half: the first time zig c++
+# targets a triple it compiles its bundled libc++ from source. That is a minute
+# of build time and about 3400 warnings from libc++'s own sources — noise that
+# is not about the project and that no flag on our command line can reach,
+# because the compilation happens inside zig. Doing it here means the runner
+# never sees it.
+#
+# ZIG_GLOBAL_CACHE_DIR is exported below so the cache built here is the cache
+# the build finds.
+RUN set -eux; \
+    case "$TARGETARCH" in \
+        arm64) zig_arch=aarch64; sha="$ZIG_SHA256_AARCH64" ;; \
+        *)     zig_arch=x86_64;  sha="$ZIG_SHA256_X86_64"  ;; \
+    esac; \
+    name="zig-${zig_arch}-linux-${ZIG_VERSION}"; \
+    curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${name}.tar.xz" -o /tmp/zig.tar.xz; \
+    echo "${sha}  /tmp/zig.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/zig.tar.xz -C /opt; \
+    mv "/opt/${name}" /opt/zig; \
+    ln -s /opt/zig/zig /usr/local/bin/zig; \
+    rm /tmp/zig.tar.xz; \
+    zig version; \
+    printf '#include <string>\n#include <vector>\nint main(){return 0;}\n' > /tmp/warm.cpp; \
+    ZIG_GLOBAL_CACHE_DIR=/opt/zig-cache \
+      zig c++ -target "${zig_arch}-linux-gnu.${ZIG_WARM_GLIBC}" -O2 \
+      /tmp/warm.cpp -o /tmp/warm 2>/dev/null; \
+    /tmp/warm; \
+    rm -f /tmp/warm /tmp/warm.cpp; \
+    chmod -R a+rX /opt/zig-cache
 
 # ---------------------------------------------------------------------------
 # Emscripten (Web). Installed for both amd64 and arm64.
@@ -266,6 +317,7 @@ RUN set -eux; \
       "  \"apt_snapshot\": \"${APT_SNAPSHOT}\"," \
       "  \"ubuntu\": \"24.04\"," \
       "  \"cmake\": \"${CMAKE_VERSION}\"," \
+      "  \"zig\": \"${ZIG_VERSION}\"," \
       "  \"ninja\": \"${NINJA_VERSION}\"," \
       "  \"emscripten\": \"${EMSCRIPTEN_VERSION}\"," \
       "  \"emsdk_commit\": \"${EMSDK_COMMIT}\"," \
@@ -285,7 +337,7 @@ WORKDIR /work
 # needs `tomllib` to read the config at all, and Pillow to produce the Android
 # launcher icons. Without them the Android job fails halfway through instead of
 # the image failing to build.
-RUN cmake --version && ninja --version && gcc --version | head -1 \
+RUN cmake --version && ninja --version && zig version && gcc --version | head -1 \
     && aarch64-linux-gnu-gcc --version | head -1 \
     && riscv64-linux-gnu-gcc --version | head -1 \
     && emcc --version | head -1 \
