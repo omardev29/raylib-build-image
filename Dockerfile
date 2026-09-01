@@ -62,6 +62,12 @@ ARG UPX_SHA256_AARCH64=55d48a61e8ffd17152db871c855376cba7f08e830b37799d0947a16df
 ARG BUTLER_VERSION=15.24.0
 ARG BUTLER_SHA256_X86_64=bee1d708b5ed3dc7efcda3b5416ad5ca87a04d7e5fb6ebada510f3ba0cba3b69
 
+# clang-format and clang-tidy for the lint job, from PyPI because that is the
+# only place they are published at a pinned patch version -- distro packages
+# move. These MUST match clang_format/clang_tidy in the framework's
+# thirdparty/FROZEN_VERSIONS.md; versions_check.sh compares them.
+ARG CLANG_TOOLS_VERSION=22.1.8
+
 # actionlint, for the lint job. amd64 only, which is what that job runs on.
 ARG ACTIONLINT_VERSION=1.7.12
 ARG ACTIONLINT_SHA256_X86_64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
@@ -274,6 +280,19 @@ RUN set -eux; \
     fi
 
 # ---------------------------------------------------------------------------
+# clang-format / clang-tidy (pinned)
+# ---------------------------------------------------------------------------
+# Installed with --break-system-packages because this is a build image with one
+# Python and no other tenant: a venv here would only add a path for every job to
+# remember.
+RUN set -eux; \
+    pip3 install --no-cache-dir --break-system-packages \
+        "clang-format==${CLANG_TOOLS_VERSION}" \
+        "clang-tidy==${CLANG_TOOLS_VERSION}"; \
+    clang-format --version; \
+    clang-tidy --version | head -2
+
+# ---------------------------------------------------------------------------
 # butler (pinned + verified). amd64 only.
 # ---------------------------------------------------------------------------
 RUN set -eux; \
@@ -396,6 +415,7 @@ RUN set -eux; \
       "  \"zig\": \"${ZIG_VERSION}\"," \
       "  \"upx\": \"${UPX_VERSION}\"," \
       "  \"actionlint\": \"${ACTIONLINT_VERSION}\"," \
+      "  \"clang_tools\": \"${CLANG_TOOLS_VERSION}\"," \
       "  \"butler\": \"${BUTLER_VERSION}\"," \
       "  \"ninja\": \"${NINJA_VERSION}\"," \
       "  \"emscripten\": \"${EMSCRIPTEN_VERSION}\"," \
