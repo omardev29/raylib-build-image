@@ -154,6 +154,10 @@ RUN apt-get install -y --no-install-recommends \
         # container, so there is no host step to escape to, and PNG decoding is
         # not in the stdlib. From the apt snapshot, so it stays frozen.
         python3-pil \
+        # pip, for the pinned clang tooling below. The hosted runners have it
+        # preinstalled and this image did not, which is why the first attempt
+        # died on `pip3: not found` -- a difference that only shows up here.
+        python3-pip \
         # raylib desktop runtime/build deps (X11 + GL)
         libx11-dev \
         libxrandr-dev \
@@ -286,7 +290,7 @@ RUN set -eux; \
 # Python and no other tenant: a venv here would only add a path for every job to
 # remember.
 RUN set -eux; \
-    pip3 install --no-cache-dir --break-system-packages \
+    python3 -m pip install --no-cache-dir --break-system-packages \
         "clang-format==${CLANG_TOOLS_VERSION}" \
         "clang-tidy==${CLANG_TOOLS_VERSION}"; \
     clang-format --version; \
