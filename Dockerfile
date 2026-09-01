@@ -50,6 +50,18 @@ ARG ZIG_SHA256_AARCH64=ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e
 # because warming for the wrong one buys nothing.
 ARG ZIG_WARM_GLIBC=2.28
 
+# UPX, for [upx] in the .toml. In the image rather than downloaded per job for
+# the reason in the framework's CLAUDE.md: a download that fails on a bad day
+# takes the whole pipeline with it, and that is what the image is for.
+ARG UPX_VERSION=5.2.0
+ARG UPX_SHA256_X86_64=3db5d3294707439db97866feab8d75d800f028f48481a40547411824da4288a1
+ARG UPX_SHA256_AARCH64=55d48a61e8ffd17152db871c855376cba7f08e830b37799d0947a16dff8ec36c
+
+# butler, for publishing to itch.io. amd64 only -- broth.itch.zone publishes no
+# arm64 build, and the itch job is x64 anyway.
+ARG BUTLER_VERSION=15.24.0
+ARG BUTLER_SHA256_X86_64=bee1d708b5ed3dc7efcda3b5416ad5ca87a04d7e5fb6ebada510f3ba0cba3b69
+
 ARG NINJA_VERSION=1.12.1
 ARG NINJA_SHA256_X86_64=6f98805688d19672bd699fbbfa2c2cf0fc054ac3df1f0e6a47664d963d530255
 ARG NINJA_SHA256_AARCH64=5c25c6570b0155e95fce5918cb95f1ad9870df5768653afe128db822301a05a1
@@ -216,6 +228,42 @@ RUN set -eux; \
     ninja --version
 
 # ---------------------------------------------------------------------------
+# UPX (pinned + verified)
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    case "$TARGETARCH" in \
+        arm64) upx_arch=arm64;  sha="$UPX_SHA256_AARCH64" ;; \
+        *)     upx_arch=amd64;  sha="$UPX_SHA256_X86_64"  ;; \
+    esac; \
+    name="upx-${UPX_VERSION}-${upx_arch}_linux"; \
+    curl -fsSL "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/${name}.tar.xz" \
+        -o /tmp/upx.tar.xz; \
+    echo "${sha}  /tmp/upx.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/upx.tar.xz -C /tmp; \
+    mv "/tmp/${name}/upx" /usr/local/bin/upx; \
+    chmod +x /usr/local/bin/upx; \
+    rm -rf /tmp/upx.tar.xz "/tmp/${name}"; \
+    upx --version | head -1
+
+# ---------------------------------------------------------------------------
+# butler (pinned + verified). amd64 only.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        echo "butler: no arm64 build published; skipping"; \
+    else \
+        curl -fsSL --retry 5 --retry-delay 3 \
+            "https://broth.itch.zone/butler/linux-amd64/${BUTLER_VERSION}/archive/default" \
+            -o /tmp/butler.zip; \
+        echo "${BUTLER_SHA256_X86_64}  /tmp/butler.zip" | sha256sum -c -; \
+        unzip -q /tmp/butler.zip -d /opt/butler; \
+        chmod +x /opt/butler/butler; \
+        ln -s /opt/butler/butler /usr/local/bin/butler; \
+        rm /tmp/butler.zip; \
+        butler -V; \
+    fi
+
+# ---------------------------------------------------------------------------
 # Zig (pinned + verified), and its libc++ built ahead of time
 # ---------------------------------------------------------------------------
 # WHY IT IS IN THE IMAGE. tools/linux_build.sh downloads it otherwise, which
@@ -318,6 +366,8 @@ RUN set -eux; \
       "  \"ubuntu\": \"24.04\"," \
       "  \"cmake\": \"${CMAKE_VERSION}\"," \
       "  \"zig\": \"${ZIG_VERSION}\"," \
+      "  \"upx\": \"${UPX_VERSION}\"," \
+      "  \"butler\": \"${BUTLER_VERSION}\"," \
       "  \"ninja\": \"${NINJA_VERSION}\"," \
       "  \"emscripten\": \"${EMSCRIPTEN_VERSION}\"," \
       "  \"emsdk_commit\": \"${EMSDK_COMMIT}\"," \
