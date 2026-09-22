@@ -144,6 +144,18 @@ RUN apt-get install -y --no-install-recommends \
         xz-utils \
         ccache \
         pkg-config \
+        # shellcheck, and it is NOT optional decoration: actionlint has no
+        # shell analysis of its own. Everything it reports about a `run:` block
+        # comes from shelling out to this binary, and when it is missing the
+        # whole rule turns itself off -- `-verbose` says
+        #   Rule "shellcheck" was disabled: exec: "shellcheck": ... not in $PATH
+        # and actionlint then exits 0 on a script full of problems. Verified
+        # both ways with a fixture workflow: SC2086 reported with the binary
+        # present, "Found total 0 errors" with it removed.
+        # The hosted runners ship shellcheck preinstalled, so this worked while
+        # the lint job ran on a bare runner and went quiet when it moved into
+        # this image -- silently, because a disabled rule looks like a clean one.
+        shellcheck \
         # Python (emsdk invokes `python`; noble only ships python3).
         # 3.12 gives `tomllib` in the stdlib, which is what tools/configure.py
         # parses raylib_multiplatform.toml with — no pip, nothing downloaded.
@@ -498,6 +510,7 @@ RUN set -eu; \
     check clang-format clang-format --version; \
     check clang-tidy   clang-tidy --version; \
     check ccache       ccache --version; \
+    check shellcheck   shellcheck --version; \
     check qemu-riscv64 qemu-riscv64-static -version; \
     # The DRM/KMS targets configure against exactly these four modules. A -dev
     # package that silently did not land is a cmake failure on a runner instead.

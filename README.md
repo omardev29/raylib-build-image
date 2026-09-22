@@ -48,6 +48,13 @@ Multiarch (`linux/amd64` + `linux/arm64`). Includes:
 - Python 3.12 with `tomllib` (stdlib), **Pillow** and **PyYAML** — the three
   things `tools/configure.py`, the Android icon generation and
   `tools/workflow_check.sh` fail without
+- `actionlint` **and `shellcheck`** — the second is not optional. actionlint has
+  no shell analysis of its own: everything it says about a `run:` block comes
+  from shelling out to `shellcheck`, and with the binary absent it disables the
+  rule and exits 0 on the same file. Verified both ways against a fixture
+  workflow (SC2086 reported with it, `Found total 0 errors` without it). The
+  hosted runners ship shellcheck, so this only went quiet when the lint job
+  moved into the image.
 - A smoke check that **invokes** every tool a CI job invokes — not just the
   compilers but `xvfb-run`, `upx`, `objdump`, `zip`, `pkg-config` (including
   the DRM/GBM/EGL modules), `clang-format`, `clang-tidy`, `actionlint` and
