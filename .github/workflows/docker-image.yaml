@@ -122,7 +122,19 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
-          REF="${{ env.REGISTRY }}/${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}"
+          # The manifest list is checked BY DIGEST, which is what the consumers
+          # pin; the containers are run BY TAG, because `docker run --platform`
+          # against a digest reference fails with "cannot overwrite digest"
+          # (the per-platform image it pulls has a different digest from the
+          # list it was asked for). The tag was pushed by the same build step
+          # and resolves to that same list.
+          DIGEST_REF="${{ env.REGISTRY }}/${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}"
+          REF="${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:${{ github.sha }}"
+          echo "::group::manifest list at the published digest"
+          docker manifest inspect "$DIGEST_REF" | tee /tmp/manifest.json
+          grep -q '"architecture": "amd64"' /tmp/manifest.json
+          grep -q '"architecture": "arm64"' /tmp/manifest.json
+          echo "::endgroup::"
           for plat in amd64 arm64; do
             echo "::group::verify linux/${plat}"
             docker run --rm --platform "linux/${plat}" -e EXPECT_ARCH="${plat}" "$REF" bash -lc '
