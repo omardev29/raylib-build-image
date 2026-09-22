@@ -45,7 +45,14 @@ Multiarch (`linux/amd64` + `linux/arm64`). Includes:
   multiarch) and `qemu-user-static` to run foreign binaries
 - **Emscripten** (Web), pinned
 - **Android** SDK/NDK + JDK 17 (amd64 only — the NDK host is x86_64)
-- A smoke check that fails the image build if a tool is broken
+- Python 3.12 with `tomllib` (stdlib), **Pillow** and **PyYAML** — the three
+  things `tools/configure.py`, the Android icon generation and
+  `tools/workflow_check.sh` fail without
+- A smoke check that **invokes** every tool a CI job invokes — not just the
+  compilers but `xvfb-run`, `upx`, `objdump`, `zip`, `pkg-config` (including
+  the DRM/GBM/EGL modules), `clang-format`, `clang-tidy`, `actionlint` and
+  `butler`. A tool that is installed but never run is a tool you find out about
+  twenty minutes into a matrix, on a change that had nothing to do with it.
 
 ### Architecture differences
 
@@ -62,7 +69,10 @@ records the architecture so this is never a surprise at 2 a.m.
 - **Push to `main`** (when `Dockerfile` changes) builds and pushes to
   `ghcr.io/<owner>/raylib-build`, tags `latest` and the commit SHA, then prints
   the **immutable digest** to the run summary and verifies the published image
-  by actually running it.
+  by actually running it — on **both** `linux/amd64` and `linux/arm64`, and
+  checking each one's manifest `arch` against the platform that was asked for.
+  Verifying only amd64 left the arm64 manifest (what the `arm64` and `drm-arm64`
+  jobs run inside) published without ever having been executed.
 
 ## Setup
 
@@ -70,9 +80,18 @@ records the architecture so this is never a surprise at 2 a.m.
 2. `git init`, add these files, commit and push.
 3. The workflow publishes the image (needs the default `GITHUB_TOKEN`; the repo
    must allow Packages writes — on by default for public repos).
-4. Copy the digest from the run summary and pin it in the template's
-   `.github/workflows/ci.yml` (`BUILD_IMAGE`). **Pin the digest, not `:latest`.**
-   A tag can be moved out from under you; a digest cannot.
+4. Copy the digest from the run summary and pin it in the framework, in the
+   **three** places that carry it — `tools/versions_check.sh` fails if any two
+   of them disagree:
+
+   | File | What holds it |
+   |---|---|
+   | `.github/workflows/ci.yml` | `PINNED_IMAGE:` in the `config` job |
+   | `.github/workflows/web-backends.yml` | the job's `container: image:` |
+   | `thirdparty/FROZEN_VERSIONS.md` | the `build_image_digest` row of its `versions` block |
+
+   **Pin the digest, not `:latest`.** A tag can be moved out from under you; a
+   digest cannot.
 
 ## Notes
 

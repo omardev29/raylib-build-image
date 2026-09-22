@@ -107,19 +107,59 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "${IMAGE}@${DIGEST}"
 
-      # Proves the image actually contains what the Dockerfile claims, on the
-      # architecture CI will really use.
-      - name: Verify published image (amd64)
+      # Proves the image actually contains what the Dockerfile claims, on BOTH
+      # architectures CI really pulls.
+      #
+      # This used to verify linux/amd64 only, which left the arm64 manifest --
+      # the one the `arm64` and `drm-arm64` jobs run inside -- published without
+      # ever having been executed. QEMU is already set up further up, so running
+      # the foreign image costs a step and not a runner.
+      #
+      # The manifest's own `arch` field is compared against the platform we
+      # asked for: that is what catches a multiarch index wired to the wrong
+      # layers, which no amount of `cmake --version` would notice.
+      - name: Verify published image (amd64 + arm64)
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
           REF="${{ env.REGISTRY }}/${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}"
+          for plat in amd64 arm64; do
+            echo "::group::verify linux/${plat}"
+            docker run --rm --platform "linux/${plat}" -e EXPECT_ARCH="${plat}" "$REF" bash -lc '
+              set -eu
+              cat /etc/raylib-build-image.json
+              grep -q "\"arch\": \"${EXPECT_ARCH}\"" /etc/raylib-build-image.json
+              cmake --version | head -1
+              ninja --version
+              zig version
+              emcc --version | head -1
+              gcc --version | head -1
+              aarch64-linux-gnu-gcc --version | head -1
+              objdump --version | head -1
+              upx --version | head -1
+              clang-format --version
+              python3 -c "import yaml, PIL, tomllib; print(\"python deps ok\")"
+              echo "OK: linux/${EXPECT_ARCH} verified"
+            '
+            echo "::endgroup::"
+          done
+          # Android, butler and actionlint are amd64-only by construction (see
+          # their install steps). Assert the presence there AND the documented
+          # absence on arm64, so the difference stays a decision rather than
+          # turning into a 2 a.m. surprise.
           docker run --rm --platform linux/amd64 "$REF" bash -lc '
-            set -e
-            cat /etc/raylib-build-image.json
-            cmake --version | head -1
-            ninja --version
-            emcc --version | head -1
+            set -eu
             test -d "$ANDROID_NDK_HOME"
-            echo "OK: image verified"
+            butler -V
+            actionlint --version
+            echo "OK: amd64-only tools present"
           '
+          docker run --rm --platform linux/arm64 "$REF" bash -lc '
+            set -eu
+            if [ -d "$ANDROID_NDK_HOME" ]; then
+              echo "FAIL: arm64 image unexpectedly carries the Android NDK" >&2
+              exit 1
+            fi
+            echo "OK: arm64 documented differences hold"
+          '
+          echo "OK: image verified on amd64 and arm64"

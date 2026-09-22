@@ -154,6 +154,12 @@ RUN apt-get install -y --no-install-recommends \
         # container, so there is no host step to escape to, and PNG decoding is
         # not in the stdlib. From the apt snapshot, so it stays frozen.
         python3-pil \
+        # PyYAML, for the framework's tools/workflow_check.sh: it parses every
+        # workflow to prove each reusable-workflow call grants the permissions
+        # its callee declares. Without it that gate printed "skip" and went
+        # green, which is how a run with zero jobs and no logs gets shipped.
+        # From the apt snapshot, so it stays frozen like everything else.
+        python3-yaml \
         # pip, for the pinned clang tooling below. The hosted runners have it
         # preinstalled and this image did not, which is why the first attempt
         # died on `pip3: not found` -- a difference that only shows up here.
@@ -179,6 +185,11 @@ RUN apt-get install -y --no-install-recommends \
         # Headless X server + Mesa software GL for the CI runtime smoke tests
         # (runs the game with no physical display; llvmpipe renders in software).
         xvfb \
+        # xauth is only a *Recommends* of xvfb, and everything here is installed
+        # with --no-install-recommends: without it `xvfb-run` dies on
+        # "xauth: command not found" and both Linux render jobs fail twenty
+        # minutes in. Named explicitly so package resolution cannot drop it.
+        xauth \
         libgl1-mesa-dri \
         # Cross toolchains (Linux ARM64 + RISC-V) + qemu for running foreign bins
         gcc-aarch64-linux-gnu \
@@ -417,6 +428,7 @@ RUN set -eux; \
       "  \"ubuntu\": \"24.04\"," \
       "  \"cmake\": \"${CMAKE_VERSION}\"," \
       "  \"zig\": \"${ZIG_VERSION}\"," \
+      "  \"zig_warm_glibc\": \"${ZIG_WARM_GLIBC}\"," \
       "  \"upx\": \"${UPX_VERSION}\"," \
       "  \"actionlint\": \"${ACTIONLINT_VERSION}\"," \
       "  \"clang_tools\": \"${CLANG_TOOLS_VERSION}\"," \
@@ -436,14 +448,79 @@ RUN set -eux; \
 WORKDIR /work
 
 # Smoke check so a broken image fails at build time, not at CI time.
-# The two Python assertions matter as much as the compilers: tools/configure.py
-# needs `tomllib` to read the config at all, and Pillow to produce the Android
-# launcher icons. Without them the Android job fails halfway through instead of
-# the image failing to build.
-RUN cmake --version && ninja --version && zig version && gcc --version | head -1 \
-    && aarch64-linux-gnu-gcc --version | head -1 \
-    && riscv64-linux-gnu-gcc --version | head -1 \
-    && emcc --version | head -1 \
-    && java -version 2>&1 | head -1 \
-    && python3 -c "import sys, tomllib; print('python', '.'.join(map(str, sys.version_info[:3])), '+ tomllib')" \
-    && python3 -c "import PIL; print('pillow', PIL.__version__)"
+#
+# The rule is: every tool a CI job invokes gets invoked HERE, because the
+# alternative is finding out twenty minutes into a matrix, on a change that
+# touched game code. This list used to be compilers only, so it never exercised
+# `xvfb-run` (both Linux render jobs), `objdump` (glibc_check.sh and three
+# static gates), `upx`, `zip`, `pkg-config`, or clang-format/clang-tidy (the
+# whole lint job) -- all installed, none of them ever proven to run.
+#
+# WHY THE `check` HELPER AND NOT `tool --version | head -1`. A pipe throws the
+# exit status away: /bin/sh on noble is dash, which has no `set -o pipefail`, so
+# `zip -v | head -1` exits 0 even when zip is not installed at all -- it prints
+# "not found" and the build goes green. That is the same shape as the
+# RAY_TEST_BOOT_OK bug in the framework's CLAUDE.md: a marker that only ever
+# prints is not a gate. `check` runs the command, keeps its exit status, and
+# only then trims the output for the log. (Reaching for `set -o pipefail`
+# instead would trade this bug for SIGPIPE flakes, because `head` exiting early
+# kills the writer.)
+#
+# The Python assertions matter as much as the compilers: tools/configure.py
+# needs `tomllib` to read the config at all, Pillow to produce the Android
+# launcher icons, and PyYAML for tools/workflow_check.sh's permission gate.
+# Without them a job fails halfway through instead of the image failing here.
+#
+# actionlint, butler and the Android SDK/NDK are amd64-only by construction
+# (see their install steps), so they are checked under TARGETARCH.
+RUN set -eu; \
+    check() { \
+        label="$1"; shift; \
+        if ! out="$("$@" 2>&1)"; then \
+            echo "SMOKE FAIL: ${label}: $* exited non-zero" >&2; \
+            printf '%s\n' "$out" >&2; \
+            return 1; \
+        fi; \
+        printf '  ok  %-14s %s\n' "$label" "$(printf '%s' "$out" | head -1)"; \
+    }; \
+    check cmake        cmake --version; \
+    check ninja        ninja --version; \
+    check zig          zig version; \
+    check gcc          gcc --version; \
+    check clang        clang --version; \
+    check gcc-aarch64  aarch64-linux-gnu-gcc --version; \
+    check gcc-riscv64  riscv64-linux-gnu-gcc --version; \
+    check emcc         emcc --version; \
+    check java         java -version; \
+    check objdump      objdump --version; \
+    check upx          upx --version; \
+    check pkg-config   pkg-config --version; \
+    check clang-format clang-format --version; \
+    check clang-tidy   clang-tidy --version; \
+    check ccache       ccache --version; \
+    check qemu-riscv64 qemu-riscv64-static -version; \
+    # The DRM/KMS targets configure against exactly these four modules. A -dev
+    # package that silently did not land is a cmake failure on a runner instead.
+    check drm-headers  pkg-config --exists libdrm gbm egl glesv2; \
+    # zip, exercised for real: `zip -v` prints a banner whether or not the tool
+    # can actually write an archive, and the packaging steps need the writing
+    # half. Round-trip through unzip, which those steps also use.
+    printf 'smoke\n' > /tmp/smoke.txt; \
+    check zip          zip -q -j /tmp/smoke.zip /tmp/smoke.txt; \
+    check unzip        unzip -t /tmp/smoke.zip; \
+    rm -f /tmp/smoke.txt /tmp/smoke.zip; \
+    # xvfb-run STARTED, not merely present on PATH: it shells out to xauth and
+    # to Xvfb, and either one being absent only shows up when it runs.
+    check xvfb-run     xvfb-run -a -s "-screen 0 64x64x24" true; \
+    check tomllib      python3 -c "import sys, tomllib; print('python', '.'.join(map(str, sys.version_info[:3])), '+ tomllib')"; \
+    check pillow       python3 -c "import PIL; print('pillow', PIL.__version__)"; \
+    check pyyaml       python3 -c "import yaml; print('pyyaml', yaml.__version__)"; \
+    if [ "$TARGETARCH" = "amd64" ]; then \
+        check actionlint  actionlint --version; \
+        check butler      butler -V; \
+        check android-ndk test -d "$ANDROID_NDK_HOME"; \
+        check android-sdk test -x "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"; \
+    else \
+        echo "  --  actionlint/butler/Android: amd64-only, absent on ${TARGETARCH} by design"; \
+    fi; \
+    echo "OK: image smoke check passed on ${TARGETARCH}"
