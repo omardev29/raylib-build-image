@@ -80,19 +80,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      # The runner's own preinstalled SDKs, which a docker build never uses.
-      # amd64 is 8.3 GB uncompressed since the Gradle home and LLVM went in, and
-      # the warm-up's four Android builds need room on top, plus the compressed
-      # copies a push makes. Running out shows up as a build that dies half an
-      # hour in with "no space left on device", so make the room first and print
-      # what there is. The arm runner's image lacks some of these; rm -f says
-      # nothing about a folder that is not there.
-      - name: Free disk space
-        run: |
-          df -h /
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          df -h /
-
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
 
