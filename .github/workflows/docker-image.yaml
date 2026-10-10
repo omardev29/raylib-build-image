@@ -2,7 +2,16 @@
 # The raylib_multiplatform repo runs its Linux jobs inside this image, so
 # toolchains are frozen and nothing is downloaded at job time.
 #
-# Pull requests build the image for both architectures but do NOT push, so a
+# Each architecture is built on a runner OF that architecture -- ubuntu-24.04
+# for amd64, ubuntu-24.04-arm for arm64, both free for a public repository --
+# and verified there, natively, on the image that job built. arm64 used to be
+# built under QEMU on the amd64 runner: every apt install, every compile and the
+# whole Python install emulated, and a build with nothing cached took well over
+# an hour. Then one more job ties the two into the multi-architecture list the
+# framework pins, checks that the list holds exactly the two images that were
+# verified, and only then moves :latest.
+#
+# Pull requests build and verify both architectures but do NOT push, so a
 # broken Dockerfile is caught before it reaches main instead of after.
 #
 # Only main publishes. A manual run (workflow_dispatch) on any other branch
@@ -23,6 +32,7 @@ on:
       - 'Dockerfile'
       - 'python/**'
       - 'smoke/**'
+      - 'verify/**'
       - '.github/workflows/docker-image.yaml'
   push:
     branches: [main]
@@ -30,6 +40,7 @@ on:
       - 'Dockerfile'
       - 'python/**'
       - 'smoke/**'
+      - 'verify/**'
       - '.github/workflows/docker-image.yaml'
   workflow_dispatch:
 
@@ -44,42 +55,49 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  # Only main publishes; everything else builds, verifies and pushes nothing.
+  PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-24.04
+  build:
+    name: build (${{ matrix.arch }})
+    strategy:
+      # Each architecture says for itself whether it built: one failing must
+      # not cancel the other half an hour in, and hide what it would have said.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     permissions:
       contents: read
       packages: write
-    outputs:
-      image: ${{ steps.img.outputs.name }}
-      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       # The runner's own preinstalled SDKs, which a docker build never uses.
-      # Both platforms' layers live on this disk while they build (amd64 alone
-      # is 8.3 GB uncompressed since the Gradle home and LLVM went in, a GB
-      # more than before, and the warm-up's four Android builds need room on
-      # top), plus the compressed copies a push makes. Running out shows up as
-      # a build that dies half an hour in with "no space left on device", so
-      # make the room first and print what there is.
+      # amd64 is 8.3 GB uncompressed since the Gradle home and LLVM went in, and
+      # the warm-up's four Android builds need room on top, plus the compressed
+      # copies a push makes. Running out shows up as a build that dies half an
+      # hour in with "no space left on device", so make the room first and print
+      # what there is. The arm runner's image lacks some of these; rm -f says
+      # nothing about a folder that is not there.
       - name: Free disk space
         run: |
           df -h /
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
           df -h /
 
-      - name: Set up QEMU (multiarch)
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
-
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -92,131 +110,180 @@ jobs:
           owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           echo "name=${owner}/raylib-build" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push image
+      # On main: pushed BY DIGEST and untagged, the image of one architecture;
+      # the publish job below makes the tagged list out of the two. Elsewhere:
+      # loaded into this runner's docker under a local name, and pushed nowhere.
+      - name: Build image
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:latest
-            ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:${{ github.sha }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: ${{ env.PUBLISH == 'true' && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, steps.img.outputs.name) || 'type=docker' }}
+          tags: ${{ env.PUBLISH != 'true' && format('rmp-verify:{0}', matrix.arch) || '' }}
           # Attestations turn the pushed manifest into an OCI index with extra
           # entries, which makes GHCR display bogus `unknown/unknown` platforms.
           provenance: false
           sbom: false
-          # Registry cache, not type=gha: this image is ~10 GB and mode=max
-          # blows straight through the 10 GB per-repo Actions cache limit,
-          # evicting itself on every run.
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:buildcache
-          cache-to: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && format('type=registry,ref={0}/{1}:buildcache,mode=max', env.REGISTRY, steps.img.outputs.name) || '' }}
+          # Registry cache, one per architecture, not type=gha: this image is
+          # ~10 GB and mode=max blows straight through the 10 GB per-repo
+          # Actions cache limit, evicting itself on every run.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:buildcache-${{ matrix.arch }}
+          cache-to: ${{ env.PUBLISH == 'true' && format('type=registry,ref={0}/{1}:buildcache-{2},mode=max', env.REGISTRY, steps.img.outputs.name, matrix.arch) || '' }}
+
+      # The image this job built, run on its own architecture -- natively, with
+      # no emulator in between -- before anything publishes it. On main it is
+      # pulled back by the digest that was pushed, so what was verified is
+      # exactly what the publish job lists.
+      - name: Verify on ${{ matrix.arch }}
+        env:
+          ARCH: ${{ matrix.arch }}
+          NAME: ${{ steps.img.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH" = true ]; then
+            REF="${REGISTRY}/${NAME}@${DIGEST}"
+            docker pull "$REF"
+          else
+            REF="rmp-verify:${ARCH}"
+          fi
+          GOT=$(docker image inspect --format '{{.Architecture}}' "$REF")
+          if [ "$GOT" != "$ARCH" ]; then
+            echo "FAIL: the image built for ${ARCH} says it is ${GOT}"
+            exit 1
+          fi
+          docker run --rm -e EXPECT_ARCH="$ARCH" -v "$PWD/verify:/verify:ro" "$REF" \
+            bash -l /verify/image.sh
+
+      - name: Hand the digest to the publish job
+        if: env.PUBLISH == 'true'
+        env:
+          ARCH: ${{ matrix.arch }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          case "$DIGEST" in sha256:*) ;; *) echo "FAIL: no digest from the build: [$DIGEST]"; exit 1 ;; esac
+          mkdir -p "$RUNNER_TEMP/digests"
+          printf '%s\n' "$DIGEST" > "$RUNNER_TEMP/digests/$ARCH"
+
+      - name: Upload the digest
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # The two verified images, as the one multi-architecture list the framework
+  # pins. Tagged with the commit first; checked to hold exactly those two
+  # digests on the platforms they were built for; and only then made :latest,
+  # which the framework's canary runs on -- a list that failed its check is
+  # never what :latest names.
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.img.outputs.name }}
+      digest: ${{ steps.list.outputs.digest }}
+    steps:
+      - name: Download the digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/digests
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase image name
+        id: img
+        run: |
+          owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          echo "name=${owner}/raylib-build" >> "$GITHUB_OUTPUT"
+
+      - name: The list, tagged with the commit
+        id: list
+        env:
+          NAME: ${{ steps.img.outputs.name }}
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/${NAME}"
+          AMD64=$(cat "$RUNNER_TEMP/digests/amd64")
+          ARM64=$(cat "$RUNNER_TEMP/digests/arm64")
+          docker buildx imagetools create -t "${IMAGE}:${GITHUB_SHA}" \
+            "${IMAGE}@${AMD64}" "${IMAGE}@${ARM64}"
+          LIST=$(docker buildx imagetools inspect "${IMAGE}:${GITHUB_SHA}" --format '{{json .Manifest}}' \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])')
+          echo "digest=${LIST}" >> "$GITHUB_OUTPUT"
+
+      # The list at its own digest -- what consumers pin -- holds exactly the
+      # two images the build jobs ran, each on the platform it was built for.
+      # This is what catches a list wired to the wrong layers.
+      - name: Verify the list
+        env:
+          NAME: ${{ steps.img.outputs.name }}
+          LIST: ${{ steps.list.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --raw "${REGISTRY}/${NAME}@${LIST}" | tee "$RUNNER_TEMP/list.json"
+          python3 - "$RUNNER_TEMP/list.json" "$RUNNER_TEMP/digests" <<'PY'
+          import json, pathlib, sys
+          listed = json.loads(pathlib.Path(sys.argv[1]).read_text())["manifests"]
+          built = {p.name: p.read_text().strip() for p in pathlib.Path(sys.argv[2]).iterdir()}
+          got = {m["platform"]["architecture"]: m["digest"] for m in listed
+                 if m["platform"]["os"] == "linux"}
+          if len(listed) != 2 or got != built:
+              sys.exit(f"FAIL: the list holds {got} ({len(listed)} entries); "
+                       f"the build jobs verified {built}")
+          for arch, digest in sorted(got.items()):
+              print(f"ok    linux/{arch}  {digest}")
+          PY
+
+      - name: Move :latest to it
+        env:
+          NAME: ${{ steps.img.outputs.name }}
+          LIST: ${{ steps.list.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create -t "${REGISTRY}/${NAME}:latest" "${REGISTRY}/${NAME}@${LIST}"
+          LATEST=$(docker buildx imagetools inspect "${REGISTRY}/${NAME}:latest" --format '{{json .Manifest}}' \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])')
+          if [ "$LATEST" != "$LIST" ]; then
+            echo "FAIL: :latest is ${LATEST}, and the list just verified is ${LIST}"
+            exit 1
+          fi
 
       # The immutable reference the consuming repo should pin. A tag can be
       # moved; a digest cannot.
       - name: Report immutable digest
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          NAME: ${{ steps.img.outputs.name }}
+          LIST: ${{ steps.list.outputs.digest }}
         run: |
-          IMAGE="${{ env.REGISTRY }}/${{ steps.img.outputs.name }}"
-          DIGEST="${{ steps.build.outputs.digest }}"
+          IMAGE="${REGISTRY}/${NAME}"
           {
             echo "## Build image published"
             echo
             echo '```'
-            echo "${IMAGE}@${DIGEST}"
+            echo "${IMAGE}@${LIST}"
             echo '```'
             echo
             echo "Pin this in \`raylib_multiplatform\`'s \`ci.yml\` (\`BUILD_IMAGE\`)."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "${IMAGE}@${DIGEST}"
-
-      # Proves the image actually contains what the Dockerfile claims, on BOTH
-      # architectures CI really pulls.
-      #
-      # This used to verify linux/amd64 only, which left the arm64 manifest --
-      # the one the `arm64` and `drm-arm64` jobs run inside -- published without
-      # ever having been executed. QEMU is already set up further up, so running
-      # the foreign image costs a step and not a runner.
-      #
-      # The manifest's own `arch` field is compared against the platform we
-      # asked for: that is what catches a multiarch index wired to the wrong
-      # layers, which no amount of `cmake --version` would notice.
-      - name: Verify published image (amd64 + arm64)
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        run: |
-          set -euo pipefail
-          # The manifest list is checked BY DIGEST, which is what the consumers
-          # pin; the containers are run BY TAG, because `docker run --platform`
-          # against a digest reference fails with "cannot overwrite digest"
-          # (the per-platform image it pulls has a different digest from the
-          # list it was asked for). The tag was pushed by the same build step
-          # and resolves to that same list.
-          DIGEST_REF="${{ env.REGISTRY }}/${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}"
-          REF="${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:${{ github.sha }}"
-          echo "::group::manifest list at the published digest"
-          docker manifest inspect "$DIGEST_REF" | tee /tmp/manifest.json
-          grep -q '"architecture": "amd64"' /tmp/manifest.json
-          grep -q '"architecture": "arm64"' /tmp/manifest.json
-          echo "::endgroup::"
-          for plat in amd64 arm64; do
-            echo "::group::verify linux/${plat}"
-            docker run --rm --platform "linux/${plat}" -e EXPECT_ARCH="${plat}" "$REF" bash -lc '
-              set -eu
-              cat /etc/raylib-build-image.json
-              grep -q "\"arch\": \"${EXPECT_ARCH}\"" /etc/raylib-build-image.json
-              cmake --version | head -1
-              ninja --version
-              zig version
-              emcc --version | head -1
-              gcc --version | head -1
-              aarch64-linux-gnu-gcc --version | head -1
-              objdump --version | head -1
-              upx --version | head -1
-              clang-format --version
-              python3 -c "import yaml, PIL, tomllib; print(\"python deps ok\")"
-              # The test toolchain (phase 15/16): LLVM 18 tools, cppcheck,
-              # Mull, the Python test tools, and the manifest keys that
-              # versions_check.sh compares against the framework pins.
-              llvm-cov --version | head -2
-              llvm-profdata --version | head -2
-              cppcheck --version
-              mull-runner-18 --version | head -1
-              test -f /usr/lib/mull-ir-frontend-18
-              python3 -c "import hypothesis, mutmut, pytest; print(\"hypothesis\", hypothesis.__version__, \"pytest\", pytest.__version__)"
-              for key in llvm cppcheck mull hypothesis mutmut pytest; do
-                grep -q "\"${key}\": \"[^\"]" /etc/raylib-build-image.json
-              done
-              echo "OK: linux/${EXPECT_ARCH} verified"
-            '
-            echo "::endgroup::"
-          done
-          # Android, butler and actionlint are amd64-only by construction (see
-          # their install steps). Assert the presence there AND the documented
-          # absence on arm64, so the difference stays a decision rather than
-          # turning into a 2 a.m. surprise.
-          docker run --rm --platform linux/amd64 "$REF" bash -lc '
-            set -eu
-            test -d "$ANDROID_NDK_HOME"
-            butler -V
-            actionlint --version
-            # The Gradle home that lets the Android job build --offline.
-            cat "$GRADLE_USER_HOME/rmp-warm.properties"
-            for key in gradle agp play_services_ads gradle_warm_commit; do
-              grep -q "\"${key}\": \"[^\"]" /etc/raylib-build-image.json
-            done
-            echo "OK: amd64-only tools present"
-          '
-          docker run --rm --platform linux/arm64 "$REF" bash -lc '
-            set -eu
-            if [ -d "$ANDROID_NDK_HOME" ]; then
-              echo "FAIL: arm64 image unexpectedly carries the Android NDK" >&2
-              exit 1
-            fi
-            if [ -e "$GRADLE_USER_HOME/rmp-warm.properties" ] || grep -q "\"gradle\":" /etc/raylib-build-image.json; then
-              echo "FAIL: arm64 image unexpectedly carries a warmed Gradle home" >&2
-              exit 1
-            fi
-            echo "OK: arm64 documented differences hold"
-          '
-          echo "OK: image verified on amd64 and arm64"
+          echo "${IMAGE}@${LIST}"
