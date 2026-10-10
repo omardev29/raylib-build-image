@@ -171,6 +171,10 @@ docker run --rm -v "$PWD":/w -w /w ghcr.io/omardev29/raylib-build:latest sh -c '
 
 - **Pull requests** build both architectures **without pushing**, so a broken
   `Dockerfile` is caught before it reaches `main`.
+- **Manual runs** (`gh workflow run docker-image.yaml --ref <branch>`) publish
+  only on `main`. On any other branch they build and smoke-check both
+  architectures like a pull request and push nothing — not `:latest`, which
+  the framework's canary runs on, and not `:buildcache`.
 - **Push to `main`** (when `Dockerfile`, `python/`, `smoke/` or the workflow
   change) builds and pushes to
   `ghcr.io/<owner>/raylib-build`, tags `latest` and the commit SHA, then prints
