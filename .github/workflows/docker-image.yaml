@@ -14,11 +14,15 @@ on:
   pull_request:
     paths:
       - 'Dockerfile'
+      - 'python/**'
+      - 'smoke/**'
       - '.github/workflows/docker-image.yaml'
   push:
     branches: [main]
     paths:
       - 'Dockerfile'
+      - 'python/**'
+      - 'smoke/**'
       - '.github/workflows/docker-image.yaml'
   workflow_dispatch:
 
@@ -47,6 +51,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # The runner's own preinstalled SDKs, which a docker build never uses.
+      # Both platforms' layers live on this disk while they build (amd64 alone
+      # is 8.3 GB uncompressed since the Gradle home and LLVM went in, a GB
+      # more than before, and the warm-up's four Android builds need room on
+      # top), plus the compressed copies a push makes. Running out shows up as
+      # a build that dies half an hour in with "no space left on device", so
+      # make the room first and print what there is.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Set up QEMU (multiarch)
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
@@ -151,6 +168,18 @@ jobs:
               upx --version | head -1
               clang-format --version
               python3 -c "import yaml, PIL, tomllib; print(\"python deps ok\")"
+              # The test toolchain (phase 15/16): LLVM 18 tools, cppcheck,
+              # Mull, the Python test tools, and the manifest keys that
+              # versions_check.sh compares against the framework pins.
+              llvm-cov --version | head -2
+              llvm-profdata --version | head -2
+              cppcheck --version
+              mull-runner-18 --version | head -1
+              test -f /usr/lib/mull-ir-frontend-18
+              python3 -c "import hypothesis, mutmut, pytest; print(\"hypothesis\", hypothesis.__version__, \"pytest\", pytest.__version__)"
+              for key in llvm cppcheck mull hypothesis mutmut pytest; do
+                grep -q "\"${key}\": \"[^\"]" /etc/raylib-build-image.json
+              done
               echo "OK: linux/${EXPECT_ARCH} verified"
             '
             echo "::endgroup::"
@@ -164,12 +193,21 @@ jobs:
             test -d "$ANDROID_NDK_HOME"
             butler -V
             actionlint --version
+            # The Gradle home that lets the Android job build --offline.
+            cat "$GRADLE_USER_HOME/rmp-warm.properties"
+            for key in gradle agp play_services_ads gradle_warm_commit; do
+              grep -q "\"${key}\": \"[^\"]" /etc/raylib-build-image.json
+            done
             echo "OK: amd64-only tools present"
           '
           docker run --rm --platform linux/arm64 "$REF" bash -lc '
             set -eu
             if [ -d "$ANDROID_NDK_HOME" ]; then
               echo "FAIL: arm64 image unexpectedly carries the Android NDK" >&2
+              exit 1
+            fi
+            if [ -e "$GRADLE_USER_HOME/rmp-warm.properties" ] || grep -q "\"gradle\":" /etc/raylib-build-image.json; then
+              echo "FAIL: arm64 image unexpectedly carries a warmed Gradle home" >&2
               exit 1
             fi
             echo "OK: arm64 documented differences hold"

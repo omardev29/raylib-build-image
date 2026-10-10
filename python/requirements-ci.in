@@ -1,0 +1,20 @@
+# The Python tools the framework's test campaign runs inside this image:
+# property tests (Hypothesis) and mutation testing (mutmut, which drives
+# pytest). Top-level pins only. requirements-ci.txt is the lock generated from
+# this file by lock.py, with every dependency pinned and hashed; the Dockerfile
+# installs the lock, never this file.
+hypothesis==6.168.5
+mutmut==3.8.0
+pytest==9.1.1
+
+# These two are pinned to the versions apt installs, and that is not optional.
+# Both are already in the image as Debian packages, and any other version makes
+# pip try to uninstall Debian's copy, which it cannot do: the build dies with
+# "Cannot uninstall Pygments 2.17.2, RECORD file not found. Hint: The package
+# was installed by debian." (seen, with pygments at 2.21.0).
+#   PyYAML   python3-yaml 6.0.1-2build2: tools/workflow_check.sh's; libcst
+#            (mutmut) depends on it.
+#   Pygments python3-pygments 2.17.2+dfsg-1: a Depends of cppcheck (for
+#            cppcheck-htmlreport); pytest, rich and textual depend on it.
+pyyaml==6.0.1
+pygments==2.17.2

@@ -7,8 +7,11 @@
 #   * the base image by @sha256 digest, not by tag;
 #   * every apt package by an Ubuntu *snapshot* timestamp, so `apt-get install`
 #     resolves to the same bytes today and in two years;
-#   * every downloaded tarball/zip verified against a hard-coded sha256;
-#   * emsdk by commit SHA, not by tag (tags are movable).
+#   * every downloaded tarball/zip/.deb verified against a hard-coded sha256;
+#   * every Python package by version AND by the sha256 of its wheel
+#     (python/requirements-ci.txt, installed with --require-hashes);
+#   * emsdk by commit SHA, not by tag (tags are movable), and the Gradle home
+#     warmed from a framework commit SHA.
 #
 # Bump a version deliberately, never by accident. When you bump anything here,
 # bump the matching row in the template's thirdparty/FROZEN_VERSIONS.md —
@@ -94,6 +97,21 @@ ARG ANDROID_BUILD_TOOLS=36.0.0
 ARG ANDROID_NDK_VERSION=28.2.13676358
 ARG ANDROID_SDK_CMAKE=3.31.6
 
+# Mull, mutation testing for C and C++. It is a clang pass plugin, so it is
+# built per LLVM release and has to be the one for the clang this image
+# compiles with: noble's clang is 18.1.3, and so are the llvm-18 and
+# libclang-rt-18-dev the apt list installs. The install step refuses a Mull
+# built for any other LLVM.
+ARG MULL_VERSION=0.34.1
+ARG MULL_LLVM_VERSION=18.1.3
+ARG MULL_SHA256_X86_64=983ea9c84ecab621414d5442a66c1a1ce4127491b79d42fd5e2fd6fe01d02699
+ARG MULL_SHA256_AARCH64=598d17a5b5304f5eae7492bd4269e9f5a57dcffc1c4a40af75336c9a8a1ef5ad
+
+# The raylib_multiplatform commit whose Android build warms the Gradle home
+# (amd64 only; see the Gradle section). A full SHA, for the same reason emsdk is
+# pinned by one. Bump it when raymob's Gradle, AGP or dependencies change.
+ARG GRADLE_WARM_COMMIT=259e1b349dfbb7a7c2e93523e6605656aefec458
+
 ENV ANDROID_HOME=/opt/android-sdk \
     EMSDK_HOME=/opt/emsdk \
     DEBIAN_FRONTEND=noninteractive
@@ -135,6 +153,24 @@ RUN apt-get install -y --no-install-recommends \
         gcc \
         g++ \
         clang \
+        # The rest of LLVM 18, for the clang above. Without it that clang
+        # compiles -fsanitize=address, -fsanitize=fuzzer and
+        # -fprofile-instr-generate and then cannot LINK them ("cannot find
+        # .../libclang_rt.profile-x86_64.a"), and there is no llvm-cov or
+        # llvm-profdata to read a profile with. All three at the clang's own
+        # version, 18.1.3, from the same snapshot:
+        #   llvm-18            llvm-cov-18, llvm-profdata-18, llvm-cxxfilt-18,
+        #                      llvm-symbolizer-18 (readable sanitizer stacks)
+        #   llvm               the unversioned names, so scripts say llvm-cov
+        #   libclang-rt-18-dev compiler-rt: the asan, ubsan, lsan, fuzzer and
+        #                      profile runtimes
+        llvm-18 \
+        llvm \
+        libclang-rt-18-dev \
+        # cppcheck, the second static analyser next to clang-tidy's. Its
+        # Depends pull in Debian's python3-pygments, which is why
+        # python/requirements-ci.in pins Pygments to that exact version.
+        cppcheck \
         git \
         ca-certificates \
         curl \
@@ -212,6 +248,34 @@ RUN apt-get install -y --no-install-recommends \
         # JDK for Android builds
         openjdk-17-jdk-headless \
     && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Mull (pinned + verified), both architectures
+# ---------------------------------------------------------------------------
+# Installed with apt rather than dpkg, so its Depends (libllvm18,
+# libclang-cpp18) resolve from the same snapshot as everything else. Gives
+# mull-runner-18 and the clang plugin /usr/lib/mull-ir-frontend-18.
+#
+# The plugin is loaded INTO clang, so an LLVM mismatch is not a warning, it is
+# a plugin that fails to load or misbehaves. Hence the assertion: the LLVM this
+# .deb was built for, the LLVM apt installed and the clang on PATH must be one
+# version.
+RUN set -eux; \
+    case "$TARGETARCH" in \
+        arm64) mull_arch=aarch64; sha="$MULL_SHA256_AARCH64" ;; \
+        *)     mull_arch=amd64;   sha="$MULL_SHA256_X86_64"  ;; \
+    esac; \
+    curl -fsSL \
+        "https://github.com/mull-project/mull/releases/download/${MULL_VERSION}/Mull-18-${MULL_VERSION}-LLVM-${MULL_LLVM_VERSION}-ubuntu-${mull_arch}-24.04.deb" \
+        -o /tmp/mull.deb; \
+    echo "${sha}  /tmp/mull.deb" | sha256sum -c -; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends /tmp/mull.deb; \
+    rm -rf /tmp/mull.deb /var/lib/apt/lists/*; \
+    test "$(llvm-config-18 --version)" = "${MULL_LLVM_VERSION}"; \
+    clang --version | grep -q "clang version ${MULL_LLVM_VERSION} "; \
+    mull-runner-18 --version | grep -q "LLVM: ${MULL_LLVM_VERSION}"; \
+    test -f /usr/lib/mull-ir-frontend-18
 
 # ---------------------------------------------------------------------------
 # RISC-V cross-build support (amd64 only): riscv64 X11/GL dev libraries.
@@ -318,6 +382,28 @@ RUN set -eux; \
         "clang-tidy==${CLANG_TOOLS_VERSION}"; \
     clang-format --version; \
     clang-tidy --version | head -2
+
+# ---------------------------------------------------------------------------
+# Python test tools (locked + hashed): Hypothesis, mutmut, pytest
+# ---------------------------------------------------------------------------
+# From python/requirements-ci.txt, a lock with every dependency pinned and the
+# sha256 of every wheel it may install (see python/lock.py). --require-hashes
+# makes a missing pin or a changed file a failed build; --only-binary=:all:
+# means nothing is compiled here, so what is installed is what was hashed.
+#
+# PyYAML and Pygments are in the lock at the versions apt installed, and pip
+# finds them already satisfied and leaves Debian's copies alone. The assertion
+# after the install is what proves it: both still import from
+# /usr/lib/python3/dist-packages, where apt put them.
+COPY python/requirements-ci.txt /usr/local/share/raylib-build-image/requirements-ci.txt
+RUN set -eux; \
+    python3 -m pip install --no-cache-dir --break-system-packages \
+        --require-hashes --only-binary=:all: \
+        -r /usr/local/share/raylib-build-image/requirements-ci.txt; \
+    python3 -c "import yaml, pygments; \
+assert yaml.__file__.startswith('/usr/lib/python3/dist-packages/'), yaml.__file__; \
+assert pygments.__file__.startswith('/usr/lib/python3/dist-packages/'), pygments.__file__"; \
+    python3 -m pip check
 
 # ---------------------------------------------------------------------------
 # butler (pinned + verified). amd64 only.
@@ -428,34 +514,174 @@ ENV ANDROID_SDK_ROOT=${ANDROID_HOME} \
 ENV PATH=${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:$PATH
 
 # ---------------------------------------------------------------------------
+# Gradle home, warmed for an --offline Android build (amd64 only)
+# ---------------------------------------------------------------------------
+# WHY IT EXISTS. Every Android job used to download Gradle and every Maven
+# dependency, ~6.5 minutes of it per run. _android.yml cached ~/.gradle, but in
+# a container job that is /github/home while Java's user.home is /root, so the
+# cache never held anything and was never saved (run 37247019962: "Path
+# Validation Error ... no cache is being saved"). A download at job time is the
+# thing this image exists to remove. GRADLE_USER_HOME points every user at the
+# same place -- the job's root, and dev_shell.sh's --user $(id -u), which is
+# why it is world-writable.
+#
+# HOW IT IS WARMED. The framework is fetched at GRADLE_WARM_COMMIT and built
+# the way _android.yml builds it: configure.py --require-icons, a throwaway
+# keystore, assembleDebug, then bundleRelease, each a --no-daemon build of its
+# own. Twice: with AdMob on and with it off, because without
+# play-services-ads, dependency resolution can settle on other androidx
+# versions. Then the wrapper's 138 MB zip and the daemon logs go -- the
+# unpacked distribution is what runs -- and BOTH variants are built again with
+# --offline from a clean tree. Anything missing fails the image build here,
+# not the first Android job after the bump.
+#
+# rmp-keep-cache.gradle turns Gradle's cache cleanup off. Without it, a
+# --no-daemon build deletes what it has not touched for 30 days, so a month
+# after publishing, an assembleDebug deletes the release-only artifacts and the
+# bundleRelease --offline after it fails. Seen, not supposed: with the clock
+# faked 60 days ahead (faketime) and the default cleanup, assembleDebug passed
+# and bundleRelease --offline died in lintVitalAnalyzeRelease with "Could not
+# download lint-gradle-31.13.2.jar ... No cached version available for offline
+# mode"; the same two builds with this file both pass.
+#
+# rmp-warm.properties says what was warmed -- gradle, agp, play_services_ads and
+# warm_commit, read from the clone with the regexes the framework's
+# versions_check.sh uses -- and the manifest copies it. A game that adds a
+# Gradle dependency of its own is not covered and fails --offline loudly.
+#
+# arm64 has no Android SDK (see above), so there the Gradle home is an empty,
+# writable directory: the variable never points at nothing.
+ENV GRADLE_USER_HOME=/opt/gradle-home
+RUN set -eux; \
+    mkdir -p "$GRADLE_USER_HOME"; \
+    if [ "$TARGETARCH" = "amd64" ]; then \
+        mkdir -p "$GRADLE_USER_HOME/init.d"; \
+        printf '%s\n' \
+            '// From the raylib-build image: this Gradle home is warmed for' \
+            '// --offline builds, and cleanup would delete what one build did not' \
+            '// touch for 30 days -- which --offline cannot download back.' \
+            'beforeSettings { settings ->' \
+            '    settings.caches {' \
+            '        cleanup = Cleanup.DISABLED' \
+            '    }' \
+            '}' \
+            > "$GRADLE_USER_HOME/init.d/rmp-keep-cache.gradle"; \
+        src=/tmp/rmp-warm; \
+        git init -q "$src"; \
+        git -C "$src" remote add origin https://github.com/omardev29/raylib_multiplatform.git; \
+        git -C "$src" fetch -q --depth 1 origin "$GRADLE_WARM_COMMIT"; \
+        git -C "$src" checkout -q FETCH_HEAD; \
+        export ANDROID_KEYSTORE_FILE="$src/raymob/release.keystore" \
+               ANDROID_KEYSTORE_PASSWORD=ci-throwaway \
+               ANDROID_KEY_ALIAS=ci-throwaway \
+               ANDROID_KEY_PASSWORD=ci-throwaway; \
+        android_build() { \
+            admob="$1"; shift; \
+            git -C "$src" clean -fdxq; \
+            git -C "$src" checkout -q -- .; \
+            (cd "$src" && python3 tools/configure.py --require-icons); \
+            sed -i "s/^admob\.enabled=.*/admob.enabled=${admob}/" "$src/raymob/generated.properties"; \
+            grep -qx "admob.enabled=${admob}" "$src/raymob/generated.properties"; \
+            keytool -genkeypair \
+                -keystore "$ANDROID_KEYSTORE_FILE" -storetype PKCS12 \
+                -alias ci-throwaway -keyalg RSA -keysize 2048 -validity 3650 \
+                -storepass ci-throwaway -keypass ci-throwaway \
+                -dname "CN=CI THROWAWAY NOT FOR PLAY, OU=CI, O=raylib-template, C=ZZ"; \
+            (cd "$src/raymob" && ./gradlew "$@" assembleDebug --no-daemon); \
+            (cd "$src/raymob" && ./gradlew "$@" bundleRelease --no-daemon); \
+            test -n "$(find "$src/raymob/app/build/outputs/apk/debug" -name '*.apk')"; \
+            test -n "$(find "$src/raymob/app/build/outputs/bundle/release" -name '*.aab')"; \
+            git -C "$src" diff --exit-code; \
+        }; \
+        android_build true; \
+        android_build false; \
+        rm -f "$GRADLE_USER_HOME"/wrapper/dists/gradle-*-bin/*/gradle-*-bin.zip; \
+        rm -rf "$GRADLE_USER_HOME/daemon"; \
+        android_build true --offline; \
+        android_build false --offline; \
+        gradle_version="$(sed -nE 's#.*/gradle-([0-9.]+)-bin\.zip.*#\1#p' "$src/raymob/gradle/wrapper/gradle-wrapper.properties" | head -1)"; \
+        agp_version="$(sed -nE "s/.*com\.android\.application' version '([^']+)'.*/\1/p" "$src/raymob/build.gradle" | head -1)"; \
+        ads_version="$(sed -nE "s/.*play-services-ads:([0-9.]+)'.*/\1/p" "$src/raymob/app/build.gradle" | head -1)"; \
+        test -n "$gradle_version"; \
+        test -n "$agp_version"; \
+        test -n "$ads_version"; \
+        ls "$GRADLE_USER_HOME/wrapper/dists/gradle-${gradle_version}-bin/"*"/gradle-${gradle_version}/bin/gradle"; \
+        printf '%s\n' \
+            "# What this Gradle home was warmed with. Written by the raylib-build image." \
+            "gradle=${gradle_version}" \
+            "agp=${agp_version}" \
+            "play_services_ads=${ads_version}" \
+            "warm_commit=${GRADLE_WARM_COMMIT}" \
+            > "$GRADLE_USER_HOME/rmp-warm.properties"; \
+        rm -rf "$src" "$GRADLE_USER_HOME/daemon" "$GRADLE_USER_HOME/caches/build-cache-1"; \
+        # AGP's per-user leftovers from the warm-up: a debug signing key and an
+        # analytics opt-in. Neither belongs in an image; CI's HOME is
+        # /github/home, where AGP makes its own.
+        rm -f /root/.android/debug.keystore /root/.android/debug.keystore.lock \
+              /root/.android/analytics.settings; \
+        cat "$GRADLE_USER_HOME/rmp-warm.properties"; \
+    else \
+        echo "Gradle home: amd64 only (no Android SDK on ${TARGETARCH}); left empty"; \
+    fi; \
+    chmod -R a+rwX "$GRADLE_USER_HOME"; \
+    du -sh "$GRADLE_USER_HOME"
+
+# ---------------------------------------------------------------------------
 # Build manifest. Every containerised CI job cats this as its first step, so a
 # failing log always says exactly which toolchain produced it. It is also what
 # the template's tools/versions_check.sh compares against.
+#
+# The keys for what came from apt or pip -- llvm, cppcheck, mull, hypothesis,
+# mutmut, pytest -- are read from the installed tool, not copied from an ARG,
+# so the manifest says what IS in the image. The Gradle keys exist on amd64
+# only, copied from rmp-warm.properties; on arm64 they are absent rather than
+# faked. Every value must be non-empty (a version that read nothing is a
+# broken image, not an unknown one) and the file must parse as JSON.
 # ---------------------------------------------------------------------------
 RUN set -eux; \
-    printf '%s\n' \
-      '{' \
-      "  \"arch\": \"${TARGETARCH}\"," \
-      "  \"apt_snapshot\": \"${APT_SNAPSHOT}\"," \
-      "  \"ubuntu\": \"24.04\"," \
-      "  \"cmake\": \"${CMAKE_VERSION}\"," \
-      "  \"zig\": \"${ZIG_VERSION}\"," \
-      "  \"zig_warm_glibc\": \"${ZIG_WARM_GLIBC}\"," \
-      "  \"upx\": \"${UPX_VERSION}\"," \
-      "  \"actionlint\": \"${ACTIONLINT_VERSION}\"," \
-      "  \"clang_tools\": \"${CLANG_TOOLS_VERSION}\"," \
-      "  \"butler\": \"${BUTLER_VERSION}\"," \
-      "  \"ninja\": \"${NINJA_VERSION}\"," \
-      "  \"emscripten\": \"${EMSCRIPTEN_VERSION}\"," \
-      "  \"emsdk_commit\": \"${EMSDK_COMMIT}\"," \
-      "  \"android_cmdline_tools\": \"${ANDROID_CMDLINE_TOOLS}\"," \
-      "  \"android_platform\": \"${ANDROID_PLATFORM}\"," \
-      "  \"android_build_tools\": \"${ANDROID_BUILD_TOOLS}\"," \
-      "  \"android_ndk\": \"${ANDROID_NDK_VERSION}\"," \
-      "  \"android_sdk_cmake\": \"${ANDROID_SDK_CMAKE}\"" \
-      '}' \
-      > /etc/raylib-build-image.json; \
-    cat /etc/raylib-build-image.json
+    kv() { printf '  "%s": "%s",\n' "$1" "$2"; }; \
+    pyver() { python3 -c 'import importlib.metadata, sys; print(importlib.metadata.version(sys.argv[1]))' "$1"; }; \
+    warm() { sed -nE "s/^$1=(.*)$/\1/p" "$GRADLE_USER_HOME/rmp-warm.properties"; }; \
+    { \
+      echo '{'; \
+      kv arch                  "${TARGETARCH}"; \
+      kv apt_snapshot          "${APT_SNAPSHOT}"; \
+      kv ubuntu                "24.04"; \
+      kv cmake                 "${CMAKE_VERSION}"; \
+      kv zig                   "${ZIG_VERSION}"; \
+      kv zig_warm_glibc        "${ZIG_WARM_GLIBC}"; \
+      kv upx                   "${UPX_VERSION}"; \
+      kv actionlint            "${ACTIONLINT_VERSION}"; \
+      kv clang_tools           "${CLANG_TOOLS_VERSION}"; \
+      kv butler                "${BUTLER_VERSION}"; \
+      kv ninja                 "${NINJA_VERSION}"; \
+      kv emscripten            "${EMSCRIPTEN_VERSION}"; \
+      kv emsdk_commit          "${EMSDK_COMMIT}"; \
+      kv llvm                  "$(llvm-config-18 --version)"; \
+      kv cppcheck              "$(cppcheck --version | sed -nE 's/^Cppcheck ([0-9.]+)$/\1/p')"; \
+      kv mull                  "$(mull-runner-18 --version | sed -nE 's/^mull-runner ([0-9.]+)$/\1/p')"; \
+      kv hypothesis            "$(pyver hypothesis)"; \
+      kv mutmut                "$(pyver mutmut)"; \
+      kv pytest                "$(pyver pytest)"; \
+      if [ "$TARGETARCH" = "amd64" ]; then \
+        kv gradle              "$(warm gradle)"; \
+        kv agp                 "$(warm agp)"; \
+        kv play_services_ads   "$(warm play_services_ads)"; \
+        kv gradle_warm_commit  "$(warm warm_commit)"; \
+      fi; \
+      kv android_cmdline_tools "${ANDROID_CMDLINE_TOOLS}"; \
+      kv android_platform      "${ANDROID_PLATFORM}"; \
+      kv android_build_tools   "${ANDROID_BUILD_TOOLS}"; \
+      kv android_ndk           "${ANDROID_NDK_VERSION}"; \
+      printf '  "%s": "%s"\n' android_sdk_cmake "${ANDROID_SDK_CMAKE}"; \
+      echo '}'; \
+    } > /etc/raylib-build-image.json; \
+    cat /etc/raylib-build-image.json; \
+    python3 -m json.tool /etc/raylib-build-image.json > /dev/null; \
+    if grep -n '": ""' /etc/raylib-build-image.json; then \
+        echo "FAIL: a manifest key above read an empty version" >&2; \
+        exit 1; \
+    fi
 
 WORKDIR /work
 
@@ -485,6 +711,21 @@ WORKDIR /work
 #
 # actionlint, butler and the Android SDK/NDK are amd64-only by construction
 # (see their install steps), so they are checked under TARGETARCH.
+#
+# THE TEST TOOLCHAIN (smoke/) is exercised the same way, and each piece has to
+# DO its job, not print a banner: a profiled binary is built, run, merged and
+# reported; cppcheck must refuse an out-of-bounds write and accept clean C++20;
+# a sanitized binary must run clean AND be stopped by each sanitizer on the
+# mistake it exists for; libFuzzer must finish 100 runs; Mull must report the
+# one mutant smoke/mull.c leaves alive; mutmut must report the mutant only a
+# Hypothesis property can kill. `expect` and `refuse` are `check` plus the text
+# the output has to contain -- with exit 0 and non-zero respectively.
+#
+# On arm64 the sanitizer, libFuzzer and Mull binaries are LINKED, not run: that
+# image is built under QEMU user emulation, where ASan's shadow memory does not
+# map, and a run that fails there says nothing about the image. Linking is what
+# proves compiler-rt's aarch64 runtimes and the Mull plugin are there.
+COPY smoke/ /tmp/rmp-smoke/
 RUN set -eu; \
     check() { \
         label="$1"; shift; \
@@ -494,6 +735,34 @@ RUN set -eu; \
             return 1; \
         fi; \
         printf '  ok  %-14s %s\n' "$label" "$(printf '%s' "$out" | head -1)"; \
+    }; \
+    expect() { \
+        label="$1"; want="$2"; shift 2; \
+        if ! out="$("$@" 2>&1)"; then \
+            echo "SMOKE FAIL: ${label}: $* exited non-zero" >&2; \
+            printf '%s\n' "$out" >&2; \
+            return 1; \
+        fi; \
+        case "$out" in \
+            *"$want"*) printf '  ok  %-14s %s\n' "$label" "$want" ;; \
+            *) echo "SMOKE FAIL: ${label}: $* printed no \"${want}\"" >&2; \
+               printf '%s\n' "$out" >&2; \
+               return 1 ;; \
+        esac; \
+    }; \
+    refuse() { \
+        label="$1"; want="$2"; shift 2; \
+        if out="$("$@" 2>&1)"; then \
+            echo "SMOKE FAIL: ${label}: $* exited 0; it had to be stopped with \"${want}\"" >&2; \
+            printf '%s\n' "$out" >&2; \
+            return 1; \
+        fi; \
+        case "$out" in \
+            *"$want"*) printf '  ok  %-14s refused: %s\n' "$label" "$want" ;; \
+            *) echo "SMOKE FAIL: ${label}: $* failed, but not with \"${want}\"" >&2; \
+               printf '%s\n' "$out" >&2; \
+               return 1 ;; \
+        esac; \
     }; \
     check cmake        cmake --version; \
     check ninja        ninja --version; \
@@ -528,12 +797,60 @@ RUN set -eu; \
     check tomllib      python3 -c "import sys, tomllib; print('python', '.'.join(map(str, sys.version_info[:3])), '+ tomllib')"; \
     check pillow       python3 -c "import PIL; print('pillow', PIL.__version__)"; \
     check pyyaml       python3 -c "import yaml; print('pyyaml', yaml.__version__)"; \
+    check llvm-cov     llvm-cov --version; \
+    check llvm-profdata llvm-profdata --version; \
+    check cppcheck     cppcheck --version; \
+    check mull-runner  mull-runner-18 --version; \
+    check py-test      python3 -c "import hypothesis, mutmut, pytest; print('hypothesis', hypothesis.__version__, '+ mutmut + pytest', pytest.__version__)"; \
+    cd /tmp/rmp-smoke; \
+    # Source-based coverage, end to end. The run must leave a .profraw, the
+    # merge must read it, and the report must find coverage.c's mapping in it.
+    check cov-build    clang -fprofile-instr-generate -fcoverage-mapping coverage.c -o coverage; \
+    check cov-run      env LLVM_PROFILE_FILE=/tmp/rmp-smoke/coverage.profraw ./coverage; \
+    check cov-merge    llvm-profdata merge -sparse coverage.profraw -o coverage.profdata; \
+    expect cov-report  "coverage.c" llvm-cov report ./coverage -instr-profile=coverage.profdata; \
+    # cppcheck analyses, it does not just parse: a known out-of-bounds write is
+    # exit 1, and clean C++20 (designated initialisers, requires) is exit 0.
+    refuse cppcheck-oob "arrayIndexOutOfBounds" \
+        cppcheck -q --error-exitcode=1 --language=c++ --std=c++20 cppcheck_bad.cpp; \
+    check cppcheck-ok  cppcheck -q --error-exitcode=1 --language=c++ --std=c++20 cppcheck_clean.cpp; \
+    check san-build    clang++ -fsanitize=address,undefined -fno-sanitize-recover=all -g sanitize.cpp -o sanitize; \
+    check fuzz-build   clang++ -fsanitize=fuzzer,address,undefined -g fuzz.cpp -o fuzz; \
+    check mull-build   clang -fpass-plugin=/usr/lib/mull-ir-frontend-18 -g -grecord-command-line mull.c -o mull; \
+    if [ "$TARGETARCH" = "amd64" ]; then \
+        expect san-clean   "sum=4" ./sanitize; \
+        refuse asan        "heap-buffer-overflow" ./sanitize heap; \
+        refuse ubsan       "signed integer overflow" ./sanitize int; \
+        refuse lsan        "detected memory leaks" ./sanitize leak; \
+        expect libfuzzer   "Done 100 runs" ./fuzz -runs=100; \
+        expect mull        "Mutation score: 75%" mull-runner-18 --allow-surviving ./mull; \
+    else \
+        echo "  --  sanitizer/libFuzzer/Mull runs: linked above, not run under QEMU on ${TARGETARCH}"; \
+    fi; \
+    # Hypothesis under pytest, on both architectures; mutmut on amd64, the one
+    # the mutation campaign runs on (it forks a pytest per mutant, and under
+    # QEMU its timeouts are measuring the emulator). No bytecode: pytest's
+    # assertion rewriting would otherwise leave 2 MB of .pyc in this layer.
+    cd /tmp/rmp-smoke/python; \
+    export PYTHONDONTWRITEBYTECODE=1; \
+    expect pytest      "2 passed" python3 -m pytest -q -p no:cacheprovider tests; \
+    if [ "$TARGETARCH" = "amd64" ]; then \
+        expect mutmut-run  "1 files mutated" mutmut run; \
+        expect mutmut      "x_at_least__mutmut_1: killed" mutmut results --all true; \
+    fi; \
+    cd /work; \
+    rm -rf /tmp/rmp-smoke; \
     if [ "$TARGETARCH" = "amd64" ]; then \
         check actionlint  actionlint --version; \
         check butler      butler -V; \
         check android-ndk test -d "$ANDROID_NDK_HOME"; \
         check android-sdk test -x "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"; \
+        expect gradle-home "warm_commit=${GRADLE_WARM_COMMIT}" cat "$GRADLE_USER_HOME/rmp-warm.properties"; \
     else \
-        echo "  --  actionlint/butler/Android: amd64-only, absent on ${TARGETARCH} by design"; \
+        echo "  --  actionlint/butler/Android/Gradle home: amd64-only, absent on ${TARGETARCH} by design"; \
+        if [ -e "$GRADLE_USER_HOME/rmp-warm.properties" ]; then \
+            echo "SMOKE FAIL: ${TARGETARCH} carries a warmed Gradle home it cannot use" >&2; \
+            exit 1; \
+        fi; \
     fi; \
     echo "OK: image smoke check passed on ${TARGETARCH}"
