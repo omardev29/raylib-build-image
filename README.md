@@ -95,13 +95,12 @@ never points at nothing, and the manifest has no `gradle`, `agp`,
 `play_services_ads` or `gradle_warm_commit` keys (absent, not faked).
 actionlint and butler are amd64-only too.
 
-The test toolchain is installed on **both**, but the smoke check only RUNS the
-sanitizer, libFuzzer and Mull binaries on amd64. The arm64 image is built under
-QEMU user emulation, where ASan's shadow memory does not map, so a failed run
-there would say nothing about the image; on arm64 they are linked, which is
-what proves the aarch64 compiler-rt runtimes and the Mull plugin are present.
-mutmut runs on amd64 only for the same reason (its per-mutant timeouts would be
-measuring the emulator); Hypothesis and pytest run on both.
+The test toolchain is installed on **both**, and the smoke check runs all of it
+on both -- the sanitizers stopping their own mistakes, libFuzzer, Mull, pytest
+with Hypothesis and mutmut -- because each architecture is built on a runner of
+its own architecture, with nothing emulated. (Until 2026-10 arm64 was built
+under QEMU, where ASan's shadow memory does not map, and those binaries were
+only linked there.)
 
 ## Why there is a Gradle home in the image
 
@@ -169,20 +168,26 @@ docker run --rm -v "$PWD":/w -w /w ghcr.io/omardev29/raylib-build:latest sh -c '
 
 `.github/workflows/docker-image.yaml`:
 
-- **Pull requests** build both architectures **without pushing**, so a broken
-  `Dockerfile` is caught before it reaches `main`.
+- **Each architecture builds on a runner of its own architecture**:
+  `ubuntu-24.04` for amd64, `ubuntu-24.04-arm` for arm64 (free for a public
+  repository). Nothing is emulated, and each job runs `verify/image.sh` inside
+  the image it built, natively, checking the image's own `arch` against the
+  one it was built for. arm64 used to build under QEMU on the amd64 runner, and
+  a build with nothing cached took an hour.
+- **Pull requests** build and verify both architectures **without pushing**,
+  so a broken `Dockerfile` is caught before it reaches `main`.
 - **Manual runs** (`gh workflow run docker-image.yaml --ref <branch>`) publish
-  only on `main`. On any other branch they build and smoke-check both
+  only on `main`. On any other branch they build and verify both
   architectures like a pull request and push nothing — not `:latest`, which
-  the framework's canary runs on, and not `:buildcache`.
-- **Push to `main`** (when `Dockerfile`, `python/`, `smoke/` or the workflow
-  change) builds and pushes to
-  `ghcr.io/<owner>/raylib-build`, tags `latest` and the commit SHA, then prints
-  the **immutable digest** to the run summary and verifies the published image
-  by actually running it — on **both** `linux/amd64` and `linux/arm64`, and
-  checking each one's manifest `arch` against the platform that was asked for.
-  Verifying only amd64 left the arm64 manifest (what the `arm64` and `drm-arm64`
-  jobs run inside) published without ever having been executed.
+  the framework's canary runs on, and not a build cache.
+- **Push to `main`** (when `Dockerfile`, `python/`, `smoke/`, `verify/` or the
+  workflow change): each build job pushes its image **by digest**, untagged,
+  and verifies that exact digest by running it. A `publish` job then makes the
+  multi-architecture list of the two, tagged with the commit SHA; checks that
+  the list holds exactly the two verified digests, each on its platform; only
+  then moves `latest` to it; and prints the list's **immutable digest** to the
+  run summary. Verifying only amd64 once left the arm64 image (what the `arm64`
+  and `drm-arm64` jobs run inside) published without ever having been executed.
 
 ## Setup
 

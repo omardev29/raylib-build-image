@@ -721,10 +721,10 @@ WORKDIR /work
 # Hypothesis property can kill. `expect` and `refuse` are `check` plus the text
 # the output has to contain -- with exit 0 and non-zero respectively.
 #
-# On arm64 the sanitizer, libFuzzer and Mull binaries are LINKED, not run: that
-# image is built under QEMU user emulation, where ASan's shadow memory does not
-# map, and a run that fails there says nothing about the image. Linking is what
-# proves compiler-rt's aarch64 runtimes and the Mull plugin are there.
+# All of it runs on both architectures: each is built on a runner of its own
+# architecture (.github/workflows/docker-image.yaml), so nothing here is
+# emulated. Under QEMU, which built arm64 until 2026-10, ASan's shadow memory
+# did not map and the arm64 binaries were only linked.
 COPY smoke/ /tmp/rmp-smoke/
 RUN set -eu; \
     check() { \
@@ -817,27 +817,20 @@ RUN set -eu; \
     check san-build    clang++ -fsanitize=address,undefined -fno-sanitize-recover=all -g sanitize.cpp -o sanitize; \
     check fuzz-build   clang++ -fsanitize=fuzzer,address,undefined -g fuzz.cpp -o fuzz; \
     check mull-build   clang -fpass-plugin=/usr/lib/mull-ir-frontend-18 -g -grecord-command-line mull.c -o mull; \
-    if [ "$TARGETARCH" = "amd64" ]; then \
-        expect san-clean   "sum=4" ./sanitize; \
-        refuse asan        "heap-buffer-overflow" ./sanitize heap; \
-        refuse ubsan       "signed integer overflow" ./sanitize int; \
-        refuse lsan        "detected memory leaks" ./sanitize leak; \
-        expect libfuzzer   "Done 100 runs" ./fuzz -runs=100; \
-        expect mull        "Mutation score: 75%" mull-runner-18 --allow-surviving ./mull; \
-    else \
-        echo "  --  sanitizer/libFuzzer/Mull runs: linked above, not run under QEMU on ${TARGETARCH}"; \
-    fi; \
-    # Hypothesis under pytest, on both architectures; mutmut on amd64, the one
-    # the mutation campaign runs on (it forks a pytest per mutant, and under
-    # QEMU its timeouts are measuring the emulator). No bytecode: pytest's
-    # assertion rewriting would otherwise leave 2 MB of .pyc in this layer.
+    expect san-clean   "sum=4" ./sanitize; \
+    refuse asan        "heap-buffer-overflow" ./sanitize heap; \
+    refuse ubsan       "signed integer overflow" ./sanitize int; \
+    refuse lsan        "detected memory leaks" ./sanitize leak; \
+    expect libfuzzer   "Done 100 runs" ./fuzz -runs=100; \
+    expect mull        "Mutation score: 75%" mull-runner-18 --allow-surviving ./mull; \
+    # Hypothesis under pytest, and mutmut, which forks a pytest per mutant. No
+    # bytecode: pytest's assertion rewriting would otherwise leave 2 MB of .pyc
+    # in this layer.
     cd /tmp/rmp-smoke/python; \
     export PYTHONDONTWRITEBYTECODE=1; \
     expect pytest      "2 passed" python3 -m pytest -q -p no:cacheprovider tests; \
-    if [ "$TARGETARCH" = "amd64" ]; then \
-        expect mutmut-run  "1 files mutated" mutmut run; \
-        expect mutmut      "x_at_least__mutmut_1: killed" mutmut results --all true; \
-    fi; \
+    expect mutmut-run  "1 files mutated" mutmut run; \
+    expect mutmut      "x_at_least__mutmut_1: killed" mutmut results --all true; \
     cd /work; \
     rm -rf /tmp/rmp-smoke; \
     if [ "$TARGETARCH" = "amd64" ]; then \
