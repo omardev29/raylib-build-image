@@ -1,0 +1,172 @@
+# Builds the Alpine run image (alpine/Dockerfile) and pushes it to GHCR as
+# ghcr.io/<owner>/raylib-run-alpine. The framework's musl-x64-run job starts
+# its musl binaries in it, pinned by digest, so that job pulls nothing from
+# Docker Hub and installs nothing at job time.
+#
+# Its own workflow, on its own paths, both ways: a change under alpine/ never
+# rebuilds the 8 GB build image, and docker-image.yaml's paths (Dockerfile,
+# python/, smoke/, verify/) do not reach alpine/, so a change to the build image
+# never rebuilds this one.
+#
+# AMD64 ONLY: the one job that runs it is x64, and the Dockerfile refuses any
+# other architecture. One build job, on a runner of that architecture, verifies
+# the image it built by running it before anything is published -- the same
+# shape as docker-image.yaml, without the list a single architecture does not
+# need.
+#
+# Pull requests and manual runs on any branch build and verify, and push
+# nothing. Only main publishes: by digest first, verified at that digest, and
+# only then tagged with the commit and with :latest. The digest goes to the run
+# summary; the framework pins it, never a tag.
+#
+# Every action is pinned by full commit SHA -- the same SHAs docker-image.yaml
+# uses.
+
+name: Build & push Alpine run image
+
+on:
+  pull_request:
+    paths:
+      - 'alpine/**'
+      - '.github/workflows/alpine-image.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'alpine/**'
+      - '.github/workflows/alpine-image.yaml'
+  workflow_dispatch:
+
+# Two pushes in a row must not race to move :latest, and the loser must not win.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  # Only main publishes; everything else builds, verifies and pushes nothing.
+  PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+
+jobs:
+  build:
+    name: build (amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase image name
+        id: img
+        run: |
+          owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          echo "name=${owner}/raylib-run-alpine" >> "$GITHUB_OUTPUT"
+
+      # On main: pushed BY DIGEST and untagged; the tags come after the
+      # verification below. Elsewhere: loaded into this runner's docker under a
+      # local name, and pushed nowhere. No build cache: the image is a few
+      # hundred MB of apk packages and a C file, and it is rebuilt only when
+      # alpine/ changes.
+      - name: Build image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: alpine
+          file: alpine/Dockerfile
+          platforms: linux/amd64
+          outputs: ${{ env.PUBLISH == 'true' && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, steps.img.outputs.name) || 'type=docker' }}
+          tags: ${{ env.PUBLISH != 'true' && 'rmp-verify-alpine:amd64' || '' }}
+          # Attestations turn the pushed manifest into an index with extra
+          # entries, which GHCR shows as `unknown/unknown` platforms.
+          provenance: false
+          sbom: false
+
+      # The image this job built, run the way the framework runs it -- with an
+      # init and with no network -- before anything publishes it. On main it
+      # is pulled back by the digest that was pushed, so what was verified is
+      # exactly what gets tagged.
+      - name: Verify on amd64
+        env:
+          NAME: ${{ steps.img.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH" = true ]; then
+            REF="${REGISTRY}/${NAME}@${DIGEST}"
+            docker pull "$REF"
+          else
+            REF="rmp-verify-alpine:amd64"
+          fi
+          GOT=$(docker image inspect --format '{{.Architecture}}' "$REF")
+          if [ "$GOT" != amd64 ]; then
+            echo "FAIL: the image built for amd64 says it is ${GOT}"
+            exit 1
+          fi
+          # The manifest parses: the image has no python3 to say so itself.
+          docker run --rm --network none "$REF" cat /etc/raylib-run-alpine.json \
+            | python3 -m json.tool > /dev/null
+          docker run --rm --init --network none -e EXPECT_ARCH=amd64 \
+            -v "$PWD/alpine/verify:/verify:ro" "$REF" sh /verify/image.sh
+
+      # Only now, with the digest verified, does anything name it: the commit
+      # and :latest, and both must resolve to that same digest.
+      # --prefer-index=false, or a single source is wrapped in a new one-entry
+      # index (buildx's default) and the tags name a digest nobody verified.
+      - name: Tag the verified digest
+        if: env.PUBLISH == 'true'
+        env:
+          NAME: ${{ steps.img.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          case "$DIGEST" in sha256:*) ;; *) echo "FAIL: no digest from the build: [$DIGEST]"; exit 1 ;; esac
+          IMAGE="${REGISTRY}/${NAME}"
+          docker buildx imagetools create --prefer-index=false \
+            -t "${IMAGE}:${GITHUB_SHA}" -t "${IMAGE}:latest" "${IMAGE}@${DIGEST}"
+          for tag in "$GITHUB_SHA" latest; do
+            GOT=$(docker buildx imagetools inspect "${IMAGE}:${tag}" --format '{{json .Manifest}}' \
+              | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])')
+            if [ "$GOT" != "$DIGEST" ]; then
+              echo "FAIL: :${tag} is ${GOT}, and the image just verified is ${DIGEST}"
+              exit 1
+            fi
+            echo "ok    :${tag} -> ${GOT}"
+          done
+
+      # The immutable reference the framework pins. A tag can be moved; a
+      # digest cannot.
+      - name: Report immutable digest
+        if: env.PUBLISH == 'true'
+        env:
+          NAME: ${{ steps.img.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          IMAGE="${REGISTRY}/${NAME}"
+          {
+            echo "## Alpine run image published"
+            echo
+            echo '```'
+            echo "${IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "Pin it in \`raylib_multiplatform\`, in the two places that carry it:"
+            echo "\`RUN_IMAGE\` in the \`musl-x64-run\` job of \`.github/workflows/_linux.yml\`,"
+            echo "and \`run_alpine_digest\` in \`thirdparty/FROZEN_VERSIONS.md\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "${IMAGE}@${DIGEST}"

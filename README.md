@@ -1,7 +1,14 @@
 # raylib-build-image
 
-Frozen CI build image for [`raylib_multiplatform`](https://github.com/omardev29/raylib_multiplatform).
-The template's Linux jobs run **inside this image** (`container:`), so every
+Frozen CI images for [`raylib_multiplatform`](https://github.com/omardev29/raylib_multiplatform).
+Two of them, built by two workflows that never rebuild each other:
+
+| Image | Built from | What runs in it |
+|---|---|---|
+| `ghcr.io/omardev29/raylib-build` | `Dockerfile` (+ `python/`, `smoke/`, `verify/`), `docker-image.yaml` | Every Linux, Web and Android job: the whole toolchain. amd64 + arm64. |
+| `ghcr.io/omardev29/raylib-run-alpine` | `alpine/`, `alpine-image.yaml` | The `musl-x64-run` job: Alpine, where the musl binary is started. amd64 only. [Below.](#the-alpine-run-image-raylib-run-alpine) |
+
+The template's Linux jobs run **inside the build image** (`container:`), so every
 compiler and library is pinned and nothing is downloaded at job time — that's
 what makes builds stable and reproducible.
 
@@ -207,6 +214,83 @@ docker run --rm -v "$PWD":/w -w /w ghcr.io/omardev29/raylib-build:latest sh -c '
 
    **Pin the digest, not `:latest`.** A tag can be moved out from under you; a
    digest cannot.
+
+## The Alpine run image (`raylib-run-alpine`)
+
+`alpine/Dockerfile`. The framework ships `linux-x64-musl` for Alpine and every
+other musl distribution, and its `musl-x64-run` job starts that binary **on
+Alpine**, twice: the headless build, which renders the golden frame with
+raylib's software renderer, and the archive a player downloads -- a desktop
+program, packed by UPX, started under `xvfb-run` on Mesa's llvmpipe. That job
+used to pull `alpine@sha256:…` from Docker Hub and `apk add` the desktop half at
+job time. A Linux job downloads nothing, so this image is that Alpine with that
+desktop already in it, and the framework pins it by digest.
+
+- **Base**: `alpine:3.20.10@sha256:c64c687c…`, the digest the job used to pull.
+- **Packages**: exactly what the job installed -- `xvfb-run mesa-gl
+  mesa-dri-gallium libxcursor libxrandr libxi libxinerama` -- and nothing
+  else. No compiler, no shell beyond busybox, no Python.
+- **amd64 only.** `musl-x64-run` is x64 and is the one job that runs it; the
+  Dockerfile refuses to build for any other architecture, and the workflow
+  builds only `linux/amd64`.
+- **No init inside.** The job starts the game with `docker run --init`, because
+  `xvfb-run` as a container's PID 1 hangs. That init is the engine's own
+  (`docker-init`, which is tini; podman's is catatonit), so nothing is
+  downloaded for it and the image does not carry a second one.
+- **Not the job's container.** The runner injects a glibc-linked Node into a
+  container job, and in a musl-only image it does not start; the job runs on the
+  plain runner and enters this image with `docker run`, with `--network none`.
+
+**What is pinned, and what is not.** The base is pinned by digest. The packages
+are not pinned to versions, and cannot usefully be: Alpine keeps one version of
+each package per release branch and deletes the one it replaces, so
+`apk add foo=1.2-r0` breaks the day a security fix lands, and there is no
+snapshot archive like `snapshot.ubuntu.com` to point at. What CI runs is frozen
+by the digest the framework pins. What a rebuild installs floats within v3.20,
+and `/etc/raylib-run-alpine.json` lists **every** installed package with its
+version, read from apk's own database, so two builds can be diffed line by line.
+The job prints it first, like the build image's manifest.
+
+**Proved, not just installed.** `alpine/smoke/glx.c` is built in a throwaway
+stage against the same Alpine and copied in as `rmp-glx-smoke`. It `dlopen()`s
+every library GLFW's X11 backend opens, by the soname GLFW asks for, makes a
+GLX context on the display `xvfb-run` started, requires the renderer to be
+`llvmpipe` (not softpipe, which is what Mesa falls back to when LLVM cannot be
+loaded), draws a triangle and reads two pixels back. The image build runs it,
+and `alpine/verify/image.sh` runs it again on the built image -- with
+`--init` and `--network none`, the way the framework runs it -- before
+anything is published. Mesa 24 tries zink first and logs `ZINK: failed to load
+libvulkan.so.1` and `glx: failed to create drisw screen` before it settles on
+llvmpipe; those lines are expected.
+
+**Publish** (`.github/workflows/alpine-image.yaml`, on `alpine/**` and itself
+only): one job on `ubuntu-24.04`. Pull requests and manual runs off `main`
+build and verify and push nothing. On `main` the image is pushed **by digest**,
+pulled back and verified at that digest, and only then tagged `:<commit>` and
+`:latest` (`--prefer-index=false`, so the tags name the verified digest and
+not a new one-entry index). The digest goes to the run summary.
+
+Pin it in the framework in the **two** places that carry it --
+`tools/versions_check.sh` fails if they disagree:
+
+| File | What holds it |
+|---|---|
+| `.github/workflows/_linux.yml` | `RUN_IMAGE:` in the `musl-x64-run` job's `env:` |
+| `thirdparty/FROZEN_VERSIONS.md` | the `run_alpine_digest` row of its `versions` block |
+
+The framework's job pulls it with its own `GITHUB_TOKEN`, which can read a
+package of another repository only when that package is public -- and a game
+made with `rmp new` pulls it from yet another repository. So **the package must
+be public**, like `raylib-build`: after the first publish, check its visibility
+in the package's settings.
+
+To build and check it locally:
+
+```sh
+docker build -t raylib-run-alpine alpine/
+docker run --rm --init --network none -e EXPECT_ARCH=amd64 \
+    -v "$PWD/alpine/verify:/verify:ro" raylib-run-alpine sh /verify/image.sh
+```
 
 ## Notes
 
