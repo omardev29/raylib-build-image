@@ -329,6 +329,10 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then set -eux; \
         apt-get update; \
         apt-get install -y --no-install-recommends wine64; \
         rm -rf /var/lib/apt/lists/*; \
+        # Ubuntu's wine64 puts its launcher in /usr/lib/wine and nothing on
+        # PATH; the `wine` that would be there comes with the 32-bit half.
+        ln -s /usr/lib/wine/wine64 /usr/local/bin/wine64; \
+        wine64 --version; \
     fi
 
 # ---------------------------------------------------------------------------
