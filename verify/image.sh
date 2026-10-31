@@ -27,6 +27,12 @@ gcc --version | head -1
 aarch64-linux-gnu-gcc --version | head -1
 objdump --version | head -1
 upx --version | head -1
+tcc -v
+x86_64-w64-mingw32-g++-posix --version | head -1
+/usr/lib/llvm-18/bin/clang-cl --version | head -1
+/usr/lib/llvm-18/bin/lld-link --version | head -1
+xwin --version
+if [ "${EXPECT_ARCH}" = "amd64" ]; then wine64 --version; fi
 clang-format --version
 python3 -c "import yaml, PIL, tomllib; print('python deps ok')"
 # The test toolchain (phase 15/16): LLVM 18 tools, cppcheck, Mull, the Python

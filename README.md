@@ -52,6 +52,14 @@ Multiarch (`linux/amd64` + `linux/arm64`). Includes:
 - raylib desktop deps (X11 / Wayland / Mesa) + `xvfb` for headless render tests
 - Cross toolchains: `aarch64-linux-gnu`, `riscv64-linux-gnu` (+ riscv64 X11 via
   multiarch) and `qemu-user-static` to run foreign binaries
+- The Windows build made on Linux: **MinGW-w64** (GCC, both thread models,
+  `windres`), **clang-cl** and **lld-link** (LLVM 18's), **xwin** (pinned by
+  sha256), which downloads Microsoft's C runtime and Windows SDK for clang-cl
+  on the developer's machine, after they accept Microsoft's licence, and
+  **Wine** (amd64 only) to start the `.exe` it made. Microsoft's files are never
+  in the image: their licence does not allow redistributing them.
+- **tcc** 0.9.28rc, built from one commit of tcc's repository, for the
+  framework's fast Debug builds of C on x86-64 Linux
 - **Emscripten** (Web), pinned
 - **Android** SDK/NDK + JDK 17 (amd64 only — the NDK host is x86_64)
 - Python 3.12 with `tomllib` (stdlib), **Pillow** and **PyYAML** — the three

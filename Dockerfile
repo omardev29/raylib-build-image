@@ -75,6 +75,13 @@ ARG CLANG_TOOLS_VERSION=22.1.8
 ARG ACTIONLINT_VERSION=1.7.12
 ARG ACTIONLINT_SHA256_X86_64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
 
+# tcc: one commit of tcc's repository, the branch it develops on (`mob`).
+ARG TCC_COMMIT=e23dabed154a8495f3ac1ff3cc9d04fa1c207893
+# xwin, from its GitHub release, pinned by the sha256 of each architecture's tarball.
+ARG XWIN_VERSION=0.10.0
+ARG XWIN_SHA256_X86_64=0000000000000000000000000000000000000000000000000000000000000000
+ARG XWIN_SHA256_AARCH64=0000000000000000000000000000000000000000000000000000000000000000
+
 ARG NINJA_VERSION=1.12.1
 ARG NINJA_SHA256_X86_64=6f98805688d19672bd699fbbfa2c2cf0fc054ac3df1f0e6a47664d963d530255
 ARG NINJA_SHA256_AARCH64=5c25c6570b0155e95fce5918cb95f1ad9870df5768653afe128db822301a05a1
@@ -244,6 +251,17 @@ RUN apt-get install -y --no-install-recommends \
         g++-aarch64-linux-gnu \
         gcc-riscv64-linux-gnu \
         g++-riscv64-linux-gnu \
+        # The Windows build made on Linux (the framework's `rmp build windows`):
+        # MinGW-w64's GCC, both thread models, its binutils and windres, and
+        # the Windows headers and import libraries it links against.
+        mingw-w64 \
+        # clang-cl, which `rmp build windows clang-cl` drives, is LLVM 18's own
+        # (/usr/lib/llvm-18/bin/clang-cl, from the clang above); lld-link links
+        # what it writes. Microsoft's CRT and SDK are NOT here: their licence
+        # does not allow redistributing them, so rmp downloads them on the
+        # developer's machine with xwin (below), after the licence is accepted.
+        lld-18 \
+        lld \
         qemu-user-static \
         # JDK for Android builds
         openjdk-17-jdk-headless \
@@ -297,6 +315,63 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then set -eux; \
         echo "OK: riscv64 multiarch X11/GL libs installed"; \
         rm -rf /var/lib/apt/lists/*; \
     fi
+
+# ---------------------------------------------------------------------------
+# Wine (amd64 only): `rmp run windows` starts the .exe the MinGW or clang-cl
+# cross build made, here, to see it boot. There is no Wine for x86 programs on
+# an arm64 Linux, so the arm64 image has none, and rmp says so there.
+# ---------------------------------------------------------------------------
+RUN if [ "$TARGETARCH" = "amd64" ]; then set -eux; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends wine64; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# ---------------------------------------------------------------------------
+# tcc, the Tiny C Compiler, for the framework's fast Debug builds of C (raylib,
+# GLFW, RGFW, miniaudio...): a 0.9.28rc from tcc's own repository at one
+# commit, since tcc's last release, 0.9.27, is from 2017 and what Ubuntu ships
+# is a 2020 snapshot that writes no DWARF and no unwind tables. The commit IS
+# the pin: git checks every object against it. The framework's cmake/tcc.cmake
+# says what tcc needs to link with everyone else's code, and uses it on x86-64
+# Linux only; it is built on arm64 too, where it compiles, so the image is the
+# same list on both.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    mkdir /tmp/tcc; cd /tmp/tcc; \
+    git init -q; \
+    git fetch -q --depth 1 https://github.com/TinyCC/tinycc "${TCC_COMMIT}"; \
+    git checkout -q FETCH_HEAD; \
+    test "$(git rev-parse HEAD)" = "${TCC_COMMIT}"; \
+    ./configure --prefix=/opt/tcc; \
+    make -j"$(nproc)"; \
+    make install; \
+    ln -s /opt/tcc/bin/tcc /usr/local/bin/tcc; \
+    cd /; rm -rf /tmp/tcc; \
+    tcc -v
+
+# ---------------------------------------------------------------------------
+# xwin, which downloads Microsoft's C runtime and Windows SDK for clang-cl on
+# the developer's own machine (`rmp build windows clang-cl`), once, after they
+# accept Microsoft's licence. The tool is here; what it downloads never is.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    case "$TARGETARCH" in \
+        arm64) arch=aarch64; sha="$XWIN_SHA256_AARCH64" ;; \
+        *)     arch=x86_64;  sha="$XWIN_SHA256_X86_64"  ;; \
+    esac; \
+    name="xwin-${XWIN_VERSION}-${arch}-unknown-linux-musl"; \
+    curl -fsSL "https://github.com/Jake-Shadle/xwin/releases/download/${XWIN_VERSION}/${name}.tar.gz" \
+        -o /tmp/xwin.tar.gz; \
+    got="$(sha256sum /tmp/xwin.tar.gz | cut -d' ' -f1)"; \
+    if [ "$got" != "$sha" ]; then \
+        echo "FAIL: xwin ${XWIN_VERSION} ${arch}: sha256 ${got}, pinned ${sha}" >&2; \
+        exit 1; \
+    fi; \
+    tar -xzf /tmp/xwin.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/${name}/xwin" /usr/local/bin/xwin; \
+    rm -rf /tmp/xwin.tar.gz "/tmp/${name}"; \
+    xwin --version
 
 # ---------------------------------------------------------------------------
 # CMake (pinned + verified; replaces distro version)
@@ -658,6 +733,14 @@ RUN set -eux; \
       kv emscripten            "${EMSCRIPTEN_VERSION}"; \
       kv emsdk_commit          "${EMSDK_COMMIT}"; \
       kv llvm                  "$(llvm-config-18 --version)"; \
+      kv tcc_commit            "${TCC_COMMIT}"; \
+      kv tcc                   "$(tcc -v | sed -nE 's/^tcc version ([^ ]+).*/\1/p')"; \
+      kv xwin                  "${XWIN_VERSION}"; \
+      kv mingw_gcc             "$(x86_64-w64-mingw32-gcc-posix -dumpfullversion)"; \
+      kv lld                   "$(ld.lld-18 --version | sed -nE 's/^.*LLD ([0-9.]+).*/\1/p')"; \
+      if [ "$TARGETARCH" = "amd64" ]; then \
+        kv wine                "$(wine64 --version | sed -nE 's/^wine-([^ ]+).*/\1/p')"; \
+      fi; \
       kv cppcheck              "$(cppcheck --version | sed -nE 's/^Cppcheck ([0-9.]+)$/\1/p')"; \
       kv mull                  "$(mull-runner-18 --version | sed -nE 's/^mull-runner ([0-9.]+)$/\1/p')"; \
       kv hypothesis            "$(pyver hypothesis)"; \
@@ -781,6 +864,13 @@ RUN set -eu; \
     check ccache       ccache --version; \
     check shellcheck   shellcheck --version; \
     check qemu-riscv64 qemu-riscv64-static -version; \
+    check tcc          tcc -v; \
+    check mingw-gcc    x86_64-w64-mingw32-gcc-posix --version; \
+    check mingw-g++    x86_64-w64-mingw32-g++-posix --version; \
+    check windres      x86_64-w64-mingw32-windres --version; \
+    check clang-cl     /usr/lib/llvm-18/bin/clang-cl --version; \
+    check lld-link     /usr/lib/llvm-18/bin/lld-link --version; \
+    check xwin         xwin --version; \
     # The DRM/KMS targets configure against exactly these four modules. A -dev
     # package that silently did not land is a cmake failure on a runner instead.
     check drm-headers  pkg-config --exists libdrm gbm egl glesv2; \
@@ -817,6 +907,13 @@ RUN set -eu; \
     check san-build    clang++ -fsanitize=address,undefined -fno-sanitize-recover=all -g sanitize.cpp -o sanitize; \
     check fuzz-build   clang++ -fsanitize=fuzzer,address,undefined -g fuzz.cpp -o fuzz; \
     check mull-build   clang -fpass-plugin=/usr/lib/mull-ir-frontend-18 -g -grecord-command-line mull.c -o mull; \
+    check tcc-build    tcc -gdwarf hello.c -o hello-tcc; \
+    expect tcc-run     "hello 49" ./hello-tcc; \
+    check mingw-build  x86_64-w64-mingw32-gcc-posix -O2 hello.c -o hello.exe; \
+    if [ "$TARGETARCH" = "amd64" ]; then \
+        expect wine-run "hello 49" env WINEDEBUG=-all WINEPREFIX=/tmp/rmp-smoke/wine wine64 ./hello.exe; \
+        rm -rf /tmp/rmp-smoke/wine; \
+    fi; \
     expect san-clean   "sum=4" ./sanitize; \
     refuse asan        "heap-buffer-overflow" ./sanitize heap; \
     refuse ubsan       "signed integer overflow" ./sanitize int; \
