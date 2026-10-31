@@ -256,10 +256,11 @@ RUN apt-get install -y --no-install-recommends \
         # the Windows headers and import libraries it links against.
         mingw-w64 \
         # clang-cl, which `rmp build windows clang-cl` drives, is LLVM 18's own
-        # (/usr/lib/llvm-18/bin/clang-cl, from the clang above); lld-link links
-        # what it writes. Microsoft's CRT and SDK are NOT here: their licence
+        # (/usr/lib/llvm-18/bin/clang-cl, which Ubuntu ships in clang-tools-18,
+        # not in clang-18); lld-link links what it writes. Microsoft's CRT and SDK are NOT here: their licence
         # does not allow redistributing them, so rmp downloads them on the
         # developer's machine with xwin (below), after the licence is accepted.
+        clang-tools-18 \
         lld-18 \
         lld \
         qemu-user-static \
