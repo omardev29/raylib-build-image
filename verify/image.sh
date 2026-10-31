@@ -31,6 +31,7 @@ tcc -v
 x86_64-w64-mingw32-g++-posix --version | head -1
 /usr/lib/llvm-18/bin/clang-cl --version | head -1
 /usr/lib/llvm-18/bin/lld-link --version | head -1
+/usr/lib/llvm-18/bin/clangd --version | head -1
 xwin --version
 if [ "${EXPECT_ARCH}" = "amd64" ]; then wine64 --version; fi
 clang-format --version

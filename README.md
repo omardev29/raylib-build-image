@@ -60,6 +60,8 @@ Multiarch (`linux/amd64` + `linux/arm64`). Includes:
   in the image: their licence does not allow redistributing them.
 - **tcc** 0.9.28rc, built from one commit of tcc's repository, for the
   framework's fast Debug builds of C on x86-64 Linux
+- **clangd** (LLVM 18's), for the editor of the `.devcontainer` that the
+  framework and every game made from it run in: this image
 - **Emscripten** (Web), pinned
 - **Android** SDK/NDK + JDK 17 (amd64 only — the NDK host is x86_64)
 - Python 3.12 with `tomllib` (stdlib), **Pillow** and **PyYAML** — the three

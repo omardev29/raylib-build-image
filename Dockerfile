@@ -261,6 +261,9 @@ RUN apt-get install -y --no-install-recommends \
         # does not allow redistributing them, so rmp downloads them on the
         # developer's machine with xwin (below), after the licence is accepted.
         clang-tools-18 \
+        # clangd, for the editor of the framework's and every game's
+        # .devcontainer, which is this image.
+        clangd-18 \
         lld-18 \
         lld \
         qemu-user-static \
@@ -871,6 +874,7 @@ RUN set -eu; \
     check windres      x86_64-w64-mingw32-windres --version; \
     check clang-cl     /usr/lib/llvm-18/bin/clang-cl --version; \
     check lld-link     /usr/lib/llvm-18/bin/lld-link --version; \
+    check clangd       /usr/lib/llvm-18/bin/clangd --version; \
     check xwin         xwin --version; \
     # The DRM/KMS targets configure against exactly these four modules. A -dev
     # package that silently did not land is a cmake failure on a runner instead.
