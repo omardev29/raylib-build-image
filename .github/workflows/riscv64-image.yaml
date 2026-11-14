@@ -1,0 +1,151 @@
+# Builds the riscv64 build image (riscv64/Dockerfile) ON A RISC-V MACHINE and
+# pushes it to GHCR as ghcr.io/<owner>/raylib-build-riscv64. The framework's
+# riscv64 job runs on a RISE runner and builds, packs and starts the game in
+# it, pinned by digest, so that job downloads nothing at job time either.
+#
+# RISE (https://riscv-runners.riseproject.dev/) gives open-source repositories
+# RISC-V runners through its GitHub App: `runs-on: ubuntu-24.04-riscv`, one
+# board per job, Docker on the board. Native, not QEMU, for the same reason the
+# build image's arm64 half is built on an arm64 runner: what is verified is
+# what the hardware does. A job RISE has no board for waits in the queue until
+# one is free; that is RISE's capacity, and nothing here can make it shorter.
+#
+# Its own workflow, on its own paths: a change under riscv64/ never rebuilds
+# the 8 GB build image or the Alpine run image, and theirs never reach this.
+#
+# Pull requests and manual runs on any branch build and verify, and push
+# nothing. Only main publishes: pushed, pulled back by the digest the registry
+# gave it, verified at that digest, and only then tagged. The digest goes to
+# the run summary; the framework pins it, never a tag.
+
+name: Build & push riscv64 build image
+
+on:
+  pull_request:
+    paths:
+      - 'riscv64/**'
+      - '.github/workflows/riscv64-image.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'riscv64/**'
+      - '.github/workflows/riscv64-image.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+
+jobs:
+  build:
+    name: build (riscv64, on RISE)
+    runs-on: ubuntu-24.04-riscv
+    # CMake and UPX are compiled from source on the board: tens of minutes.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: The machine
+        run: |
+          set -euo pipefail
+          uname -a
+          test "$(uname -m)" = riscv64 || { echo "FAIL: not a RISC-V runner: $(uname -m)"; exit 1; }
+          nproc
+          docker version --format 'docker {{.Server.Version}} on {{.Server.Arch}}'
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase image name
+        id: img
+        run: |
+          owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          echo "name=${owner}/raylib-build-riscv64" >> "$GITHUB_OUTPUT"
+
+      # The board's own Docker, its own architecture: no buildx, no emulator.
+      - name: Build image
+        run: docker build --pull=false -t rmp-verify-riscv64:local riscv64
+
+      # On main: pushed, and the registry's digest is what everything after
+      # this names. Elsewhere: the local image, pushed nowhere.
+      - name: Push by digest
+        id: push
+        if: env.PUBLISH == 'true'
+        env:
+          NAME: ${{ steps.img.outputs.name }}
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/${NAME}"
+          docker tag rmp-verify-riscv64:local "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          REF=$(docker image inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${GITHUB_SHA}")
+          DIGEST="${REF#*@}"
+          case "$DIGEST" in sha256:*) ;; *) echo "FAIL: no digest from the push: [$REF]"; exit 1 ;; esac
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify on riscv64
+        env:
+          NAME: ${{ steps.img.outputs.name }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH" = true ]; then
+            REF="${REGISTRY}/${NAME}@${DIGEST}"
+            docker image rm "${REGISTRY}/${NAME}:${GITHUB_SHA}" rmp-verify-riscv64:local
+            docker pull "$REF"
+          else
+            REF="rmp-verify-riscv64:local"
+          fi
+          GOT=$(docker image inspect --format '{{.Architecture}}' "$REF")
+          test "$GOT" = riscv64 || { echo "FAIL: the image says it is ${GOT}"; exit 1; }
+          docker run --rm --init --network none \
+            -v "$PWD/riscv64/verify:/verify:ro" "$REF" sh /verify/image.sh
+
+      - name: Tag the verified digest
+        if: env.PUBLISH == 'true'
+        env:
+          NAME: ${{ steps.img.outputs.name }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/${NAME}"
+          docker tag "${IMAGE}@${DIGEST}" "${IMAGE}:latest"
+          docker push "${IMAGE}:latest"
+          GOT=$(docker image inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:latest")
+          test "${GOT#*@}" = "$DIGEST" || { echo "FAIL: :latest is ${GOT#*@}, verified ${DIGEST}"; exit 1; }
+          echo "ok    :latest -> ${DIGEST}"
+
+      - name: Report immutable digest
+        if: env.PUBLISH == 'true'
+        env:
+          NAME: ${{ steps.img.outputs.name }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          IMAGE="${REGISTRY}/${NAME}"
+          {
+            echo "## riscv64 build image published"
+            echo
+            echo '```'
+            echo "${IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "Pin it in \`raylib_multiplatform\`: \`riscv64_build_image\` in"
+            echo "\`.github/workflows/ci.yml\` and \`build_riscv64_digest\` in \`thirdparty/FROZEN_VERSIONS.md\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "${IMAGE}@${DIGEST}"

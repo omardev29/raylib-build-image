@@ -7,6 +7,7 @@ Two of them, built by two workflows that never rebuild each other:
 |---|---|---|
 | `ghcr.io/omardev29/raylib-build` | `Dockerfile` (+ `python/`, `smoke/`, `verify/`), `docker-image.yaml` | Every Linux, Web and Android job: the whole toolchain. amd64 + arm64. |
 | `ghcr.io/omardev29/raylib-run-alpine` | `alpine/`, `alpine-image.yaml` | The `musl-x64-run` job: Alpine, where the musl binary is started. amd64 only. [Below.](#the-alpine-run-image-raylib-run-alpine) |
+| `ghcr.io/omardev29/raylib-build-riscv64` | `riscv64/`, `riscv64-image.yaml` | The `riscv64` job on a RISE RISC-V runner: native gcc 13, CMake, Ninja, UPX, Xvfb and Mesa. riscv64 only, built on RISC-V. [Below.](#the-riscv64-build-image-raylib-build-riscv64) |
 
 The template's Linux jobs run **inside the build image** (`container:`), so every
 compiler and library is pinned and nothing is downloaded at job time — that's
@@ -301,6 +302,32 @@ docker build -t raylib-run-alpine alpine/
 docker run --rm --init --network none -e EXPECT_ARCH=amd64 \
     -v "$PWD/alpine/verify:/verify:ro" raylib-run-alpine sh /verify/image.sh
 ```
+
+## The riscv64 build image (`raylib-build-riscv64`)
+
+`riscv64/Dockerfile`. The framework builds `linux-riscv64-glibc` natively on a
+[RISE](https://riscv-runners.riseproject.dev/) RISC-V runner (`runs-on: ubuntu-24.04-riscv`)
+and falls back to cross-compiling in the build image, under QEMU, when RISE fails or has no
+board. The native job runs on the RISE runner and enters this image with `docker run` to build,
+pack and start the game, so it downloads nothing at job time.
+
+The build image cannot serve: it is amd64 and arm64, and most of it (zig's cache, Mull, emsdk,
+the Android SDK, mingw, wine, xwin, Kitware's CMake and UPX's release binaries) has no riscv64
+build. This image is only what the riscv64 job needs:
+
+- Ubuntu 24.04 riscv64, from the same `ubuntu:24.04` index digest and the same apt snapshot as
+  the build image, so its gcc 13 and glibc are the ones the cross toolchain uses. The native and
+  the cross build of a commit are the same binary: one size line, one glibc floor.
+- CMake 3.30.3 and UPX 5.2.0, compiled here from their release sources (sha256-pinned), because
+  neither publishes riscv64 binaries. Ninja is noble's 1.11.1.
+- The X11/GL headers, Xvfb, xauth and Mesa's llvmpipe, proven at build time by drawing a triangle
+  (`riscv64/smoke/glx.c`, the Alpine image's own smoke program).
+
+`riscv64-image.yaml` builds it on a RISE runner (riscv64 only: the Dockerfile refuses any other
+architecture), runs `riscv64/verify/image.sh` in it with no network, and on main pushes it,
+pulls it back by digest, verifies that digest and only then tags it. Pin the digest from the
+run summary in the framework: `riscv64_build_image` in `ci.yml` and `build_riscv64_digest` in
+`thirdparty/FROZEN_VERSIONS.md`.
 
 ## Notes
 
