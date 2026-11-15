@@ -14,7 +14,7 @@
 # and most of what it carries has no riscv64 build at all -- zig's warmed libc++
 # cache, Mull, emsdk, the Android SDK and NDK, the Gradle home, mingw, wine,
 # xwin, Kitware's CMake binaries, UPX's release binaries. The riscv64 job needs
-# none of those; it needs a C and C++ compiler, CMake, Ninja, UPX, Python, the
+# none of those; it needs a C and C++ compiler, CMake, Ninja, Python, the
 # X11/GL headers and an X server with Mesa to start the game on. So this image
 # is that, and only that, built and verified ON a RISC-V machine.
 #
@@ -27,11 +27,18 @@
 #
 # EVERYTHING IS PINNED: the base by digest (the same ubuntu:24.04 index the
 # build image pins, whose riscv64 entry this is), apt by snapshot timestamp,
-# and every source tarball by sha256. CMake and UPX have no riscv64 release
-# binaries, so both are built here from their release sources, at the versions
-# the build image carries (3.30.3 and 5.2.0). Ninja is noble's ninja-build,
-# 1.11.1, from the snapshot: its source tarball is not served to every network
-# this file is edited on, and nothing the framework does asks for 1.12.
+# and every source tarball by sha256. CMake has no riscv64 release binary, so
+# it is built here from its release source, at the version the build image
+# carries (3.30.3). Ninja is noble's ninja-build, 1.11.1, from the snapshot:
+# its source tarball is not served to every network this file is edited on,
+# and nothing the framework does asks for 1.12.
+#
+# NO UPX. The framework never packs linux-riscv64-glibc: UPX 5.2.0's riscv64
+# stub dies with SIGTRAP on every kernel before 6.3, RISE's 5.10 among them --
+# memfd_create(MFD_EXEC) is EINVAL there, and that stub, unlike amd64's and
+# arm64's, never tries again without the flag (raylib_multiplatform's
+# CLAUDE.md). tools/upx_pack.sh leaves a target [upx] does not pack without
+# calling upx at all.
 #
 #   docker build -t raylib-build-riscv64 riscv64/        # on a riscv64 machine
 
@@ -43,8 +50,6 @@ ARG APT_SNAPSHOT=20260801T000000Z
 ARG CMAKE_VERSION=3.30.3
 # Kitware's own cmake-3.30.3-SHA-256.txt lists this for cmake-3.30.3.tar.gz.
 ARG CMAKE_SRC_SHA256=6d5de15b6715091df7f5441007425264bdd477809f80333fdf95f846aaff88e4
-ARG UPX_VERSION=5.2.0
-ARG UPX_SRC_SHA256=af99e526d5759de94412aea1104d5e4ca406cb725295f8633ecc9e843dc1ce1c
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -88,7 +93,6 @@ RUN set -eux; \
 #   xvfb xauth libgl1-mesa-dri
 #                            an X server and Mesa's llvmpipe, to start the game
 #                            on; xauth is only a Recommends of xvfb
-#   zlib1g-dev               UPX's build
 RUN apt-get install -y --no-install-recommends \
         build-essential gcc g++ \
         ninja-build \
@@ -100,7 +104,6 @@ RUN apt-get install -y --no-install-recommends \
         libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxinerama-dev \
         libgl1-mesa-dev libwayland-dev libxkbcommon-dev wayland-protocols \
         xvfb xauth libgl1-mesa-dri \
-        zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # CMake, from Kitware's release source (no riscv64 binary is released). No
@@ -118,21 +121,6 @@ RUN set -eux; \
     make install; \
     cd /; rm -rf /tmp/cmake*; \
     cmake --version | grep -q "cmake version ${CMAKE_VERSION}"
-
-# UPX, from its release source (its releases carry no riscv64 binary). The
-# framework packs the riscv64 binary with it ([upx] enabled).
-RUN set -eux; \
-    cd /tmp; \
-    curl -fsSL "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-src.tar.xz" \
-        -o upx.tar.xz; \
-    echo "${UPX_SRC_SHA256}  upx.tar.xz" | sha256sum -c -; \
-    tar -xJf upx.tar.xz; \
-    cmake -S "upx-${UPX_VERSION}-src" -B upx-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-        -DUPX_CONFIG_DISABLE_GITREV=ON -DUPX_CONFIG_DISABLE_SELF_PACK_TEST=ON; \
-    cmake --build upx-build; \
-    install -m 0755 upx-build/upx /usr/local/bin/upx; \
-    cd /; rm -rf /tmp/upx*; \
-    upx --version | head -1 | grep -q "upx ${UPX_VERSION}"
 
 # The smoke program: a GLX context on llvmpipe, a triangle, its pixels read
 # back (the same smoke/glx.c the Alpine run image proves itself with).
@@ -157,7 +145,6 @@ RUN set -eu; \
       kv glibc        "$(ldd --version | sed -nE '1s/.* ([0-9]+\.[0-9]+)$/\1/p')"; \
       kv cmake        "$(cmake --version | sed -nE '1s/^cmake version ([0-9.]+)$/\1/p')"; \
       kv ninja        "$(ninja --version)"; \
-      kv upx          "$(upx --version | sed -nE '1s/^upx ([0-9.]+).*/\1/p')"; \
       kv python       "$(python3 -c 'import platform; print(platform.python_version())')"; \
       printf '  "%s": "%s"\n' mesa "$(deb libgl1-mesa-dri)"; \
       echo '}'; \

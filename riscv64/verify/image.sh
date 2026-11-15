@@ -21,19 +21,17 @@ grep -q '"arch": "riscv64"' "$MANIFEST" || { echo "FAIL: the manifest's arch is 
 
 # The pins the framework compares (thirdparty/FROZEN_VERSIONS.md).
 grep -q '"cmake": "3.30.3"' "$MANIFEST" || { echo "FAIL: cmake is not 3.30.3" >&2; exit 1; }
-grep -q '"upx": "5.2.0"' "$MANIFEST"    || { echo "FAIL: upx is not 5.2.0" >&2; exit 1; }
 grep -q '"ubuntu": "24.04"' "$MANIFEST" || { echo "FAIL: not Ubuntu 24.04" >&2; exit 1; }
 
 # Every tool the framework's job starts, started -- not just looked for.
-for t in gcc g++ cmake ninja upx python3 objdump zip unzip pkg-config xvfb-run Xvfb xauth timeout git; do
+for t in gcc g++ cmake ninja python3 objdump zip unzip pkg-config xvfb-run Xvfb xauth timeout git; do
     command -v "$t" > /dev/null || { echo "FAIL: no $t" >&2; exit 1; }
 done
 gcc --version | head -1
 cmake --version | head -1
-upx --version | head -1
 
 # The job in miniature, part one: CMake + Ninja + g++ build a C++20 program
-# against X11 and GL, and UPX packs it and the packed copy still runs.
+# against X11 and GL, and it runs. No UPX here, on purpose: see the Dockerfile.
 WORK=$(mktemp -d)
 cat > "$WORK/CMakeLists.txt" <<'EOF'
 cmake_minimum_required(VERSION 3.30)
@@ -54,9 +52,6 @@ EOF
 cmake -S "$WORK" -B "$WORK/build" -G Ninja -DCMAKE_BUILD_TYPE=Release > /dev/null
 cmake --build "$WORK/build" > /dev/null
 "$WORK/build/probe" | grep -q '^PROBE_OK 3$' || { echo "FAIL: the probe did not run" >&2; exit 1; }
-cp "$WORK/build/probe" "$WORK/packed"
-upx -q "$WORK/packed" > /dev/null
-"$WORK/packed" | grep -q '^PROBE_OK 3$' || { echo "FAIL: the UPX-packed probe did not run" >&2; exit 1; }
 rm -rf "$WORK"
 
 # Part two: a GLX context on llvmpipe, a triangle, its pixels.

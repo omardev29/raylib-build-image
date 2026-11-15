@@ -47,7 +47,7 @@ jobs:
   build:
     name: build (riscv64, on RISE)
     runs-on: ubuntu-24.04-riscv
-    # CMake and UPX are compiled from source on the board: tens of minutes.
+    # CMake is compiled from source on the board: tens of minutes.
     timeout-minutes: 180
     permissions:
       contents: read

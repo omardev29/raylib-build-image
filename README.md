@@ -7,7 +7,7 @@ Two of them, built by two workflows that never rebuild each other:
 |---|---|---|
 | `ghcr.io/omardev29/raylib-build` | `Dockerfile` (+ `python/`, `smoke/`, `verify/`), `docker-image.yaml` | Every Linux, Web and Android job: the whole toolchain. amd64 + arm64. |
 | `ghcr.io/omardev29/raylib-run-alpine` | `alpine/`, `alpine-image.yaml` | The `musl-x64-run` job: Alpine, where the musl binary is started. amd64 only. [Below.](#the-alpine-run-image-raylib-run-alpine) |
-| `ghcr.io/omardev29/raylib-build-riscv64` | `riscv64/`, `riscv64-image.yaml` | The `riscv64` job on a RISE RISC-V runner: native gcc 13, CMake, Ninja, UPX, Xvfb and Mesa. riscv64 only, built on RISC-V. [Below.](#the-riscv64-build-image-raylib-build-riscv64) |
+| `ghcr.io/omardev29/raylib-build-riscv64` | `riscv64/`, `riscv64-image.yaml` | The `riscv64` job on a RISE RISC-V runner: native gcc 13, CMake, Ninja, Xvfb and Mesa. riscv64 only, built on RISC-V. [Below.](#the-riscv64-build-image-raylib-build-riscv64) |
 
 The template's Linux jobs run **inside the build image** (`container:`), so every
 compiler and library is pinned and nothing is downloaded at job time — that's
@@ -306,10 +306,11 @@ docker run --rm --init --network none -e EXPECT_ARCH=amd64 \
 ## The riscv64 build image (`raylib-build-riscv64`)
 
 `riscv64/Dockerfile`. The framework builds `linux-riscv64-glibc` natively on a
-[RISE](https://riscv-runners.riseproject.dev/) RISC-V runner (`runs-on: ubuntu-24.04-riscv`)
-and falls back to cross-compiling in the build image, under QEMU, when RISE fails or has no
-board. The native job runs on the RISE runner and enters this image with `docker run` to build,
-pack and start the game, so it downloads nothing at job time.
+RISC-V board -- [RISE](https://riscv-runners.riseproject.dev/)'s (`runs-on: ubuntu-24.04-riscv`)
+or [Cloud-V](https://cloud-v.co/github-riscv-runner)'s (`[self-hosted, milkv-pioneer]`), as its
+`[ci] riscv64` says -- and falls back to cross-compiling in the build image, under QEMU, when the
+board fails or none comes. The native job enters this image with `docker run` to build, pack and
+start the game, so it downloads nothing at job time.
 
 The build image cannot serve: it is amd64 and arm64, and most of it (zig's cache, Mull, emsdk,
 the Android SDK, mingw, wine, xwin, Kitware's CMake and UPX's release binaries) has no riscv64
@@ -318,8 +319,11 @@ build. This image is only what the riscv64 job needs:
 - Ubuntu 24.04 riscv64, from the same `ubuntu:24.04` index digest and the same apt snapshot as
   the build image, so its gcc 13 and glibc are the ones the cross toolchain uses. The native and
   the cross build of a commit are the same binary: one size line, one glibc floor.
-- CMake 3.30.3 and UPX 5.2.0, compiled here from their release sources (sha256-pinned), because
-  neither publishes riscv64 binaries. Ninja is noble's 1.11.1.
+- CMake 3.30.3, compiled here from its release source (sha256-pinned), because Kitware publishes
+  no riscv64 binary. Ninja is noble's 1.11.1.
+- No UPX: the framework never packs `linux-riscv64-glibc`. UPX 5.2.0's riscv64 stub dies with
+  SIGTRAP on every kernel before 6.3 (RISE's boards run 5.10): `memfd_create(MFD_EXEC)` is EINVAL
+  there, and that stub, unlike the amd64 and arm64 ones, never retries without the flag.
 - The X11/GL headers, Xvfb, xauth and Mesa's llvmpipe, proven at build time by drawing a triangle
   (`riscv64/smoke/glx.c`, the Alpine image's own smoke program).
 
